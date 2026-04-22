@@ -27,6 +27,7 @@ from app.schemas import (
     SyncJobOut,
 )
 from app.services.snowflake_analytics import get_quarantine_analytics
+from app.db.snowflake import get_snowflake_connection
 from app.services.pipeline import get_pipeline_state, run_pipeline
 from app.services.sync_jobs import run_scheduled_sync_job, run_sync_job
 from app.services.sync_scheduler import (
@@ -142,6 +143,48 @@ def on_startup():
 @app.get("/")
 def home():
     return {"message": "Backend running 🚀"}
+
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    database_status = "ok"
+    snowflake_status = "skipped"
+
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        database_status = "failed"
+
+    snowflake_required = [
+        os.getenv("SNOWFLAKE_ACCOUNT", "").strip(),
+        os.getenv("SNOWFLAKE_USER", "").strip(),
+        os.getenv("SNOWFLAKE_PASSWORD", "").strip(),
+    ]
+    if all(snowflake_required):
+        try:
+            connection = get_snowflake_connection()
+            try:
+                cursor = connection.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                cursor.close()
+                connection.close()
+            snowflake_status = "ok"
+        except Exception:
+            snowflake_status = "failed"
+
+    overall_status = (
+        "ok" if database_status == "ok" and snowflake_status in {"ok", "skipped"} else "degraded"
+    )
+
+    return {
+        "status": overall_status,
+        "api": "ok",
+        "database": database_status,
+        "snowflake": snowflake_status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.post("/auth/login")
