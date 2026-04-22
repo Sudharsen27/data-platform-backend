@@ -12,6 +12,7 @@ class QuarantineData(Base):
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, default="")
     error = Column(String, nullable=False, default="")
+    match_status = Column(String, nullable=False, default="new")
 
 
 class Rule(Base):
@@ -47,3 +48,13 @@ class AuditLog(Base):
     old_value = Column(String, nullable=False, default="")
     new_value = Column(String, nullable=False, default="")
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PipelineRun(Base):
+    __tablename__ = "pipeline_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, nullable=False, default="running")
+    records_processed = Column(Integer, nullable=False, default=0)
+    start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
+    end_time = Column(DateTime, nullable=True)

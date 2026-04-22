@@ -15,9 +15,17 @@ class QuarantineUpdate(QuarantineBase):
 
 class QuarantineOut(QuarantineBase):
     id: int
+    match_status: str = "new"
 
     class Config:
         from_attributes = True
+
+
+class QuarantinePageOut(BaseModel):
+    items: list[QuarantineOut]
+    total: int
+    offset: int
+    limit: int
 
 
 class RuleBase(BaseModel):
@@ -69,6 +77,17 @@ class AuditLogOut(BaseModel):
     old_value: str
     new_value: str
     timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PipelineRunOut(BaseModel):
+    id: int
+    status: str
+    records_processed: int
+    start_time: datetime
+    end_time: datetime | None = None
 
     class Config:
         from_attributes = True

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from typing import List
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,9 +13,11 @@ from sqlalchemy.orm import Session
 from jose import jwt
 
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import AuditLog, QuarantineData, Rule, SyncJob
+from app.models import AuditLog, PipelineRun, QuarantineData, Rule, SyncJob
 from app.schemas import (
     AuditLogOut,
+    PipelineRunOut,
+    QuarantinePageOut,
     QuarantineOut,
     QuarantineUpdate,
     RuleCreate,
@@ -25,6 +27,7 @@ from app.schemas import (
     SyncJobOut,
 )
 from app.services.snowflake_analytics import get_quarantine_analytics
+from app.services.pipeline import get_pipeline_state, run_pipeline
 from app.services.sync_jobs import run_scheduled_sync_job, run_sync_job
 from app.services.sync_scheduler import (
     configure_sync_schedule,
@@ -84,6 +87,11 @@ def seed_data(db: Session):
     db.execute(
         text(
             "ALTER TABLE rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE quarantine_data ADD COLUMN IF NOT EXISTS match_status VARCHAR DEFAULT 'new'"
         )
     )
     db.commit()
@@ -192,6 +200,28 @@ def dashboard(db: Session = Depends(get_db)):
 @app.get("/quarantine", response_model=List[QuarantineOut])
 def get_quarantine(db: Session = Depends(get_db)):
     return db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
+
+
+@app.get("/quarantine/paged", response_model=QuarantinePageOut)
+def get_quarantine_paged(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    total = db.query(QuarantineData).count()
+    items = (
+        db.query(QuarantineData)
+        .order_by(QuarantineData.id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @app.post("/quarantine/update")
@@ -377,3 +407,27 @@ def export_analytics_csv():
 @app.get("/audit/logs", response_model=List[AuditLogOut])
 def get_audit_logs(db: Session = Depends(get_db)):
     return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(100).all()
+
+
+@app.post("/pipeline/run")
+def trigger_pipeline_run(db: Session = Depends(get_db)):
+    state = get_pipeline_state()
+    if state["status"] == "running":
+        raise HTTPException(status_code=409, detail="Pipeline is already running")
+
+    try:
+        return run_pipeline(db)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {error}")
+
+
+@app.get("/pipeline/status")
+def get_pipeline_status():
+    return get_pipeline_state()
+
+
+@app.get("/pipeline/runs", response_model=List[PipelineRunOut])
+def get_pipeline_runs(db: Session = Depends(get_db)):
+    return db.query(PipelineRun).order_by(PipelineRun.id.desc()).limit(100).all()
