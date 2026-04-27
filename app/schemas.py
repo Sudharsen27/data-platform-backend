@@ -91,3 +91,18 @@ class PipelineRunOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class StewardshipOut(BaseModel):
+    id: int
+    name: str
+    email: str
+    issue: str
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+class StewardshipActionRequest(BaseModel):
+    id: int

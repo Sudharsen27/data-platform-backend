@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 from jose import jwt
 
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import AuditLog, PipelineRun, QuarantineData, Rule, SyncJob
+from app.models import (
+    AuditLog,
+    MasterData,
+    PipelineRun,
+    QuarantineData,
+    Rule,
+    StewardshipQueue,
+    SyncJob,
+)
 from app.schemas import (
     AuditLogOut,
     PipelineRunOut,
@@ -24,6 +32,8 @@ from app.schemas import (
     RuleOut,
     RuleUpdate,
     SchedulerToggleRequest,
+    StewardshipActionRequest,
+    StewardshipOut,
     SyncJobOut,
 )
 from app.services.snowflake_analytics import get_quarantine_analytics
@@ -99,6 +109,16 @@ def seed_data(db: Session):
     db.execute(
         text(
             "ALTER TABLE quarantine_data ADD COLUMN IF NOT EXISTS match_status VARCHAR DEFAULT 'new'"
+        )
+    )
+    db.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS stewardship_queue (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, email VARCHAR DEFAULT '', issue VARCHAR DEFAULT '', status VARCHAR DEFAULT 'pending')"
+        )
+    )
+    db.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS master_data (id SERIAL PRIMARY KEY, source_queue_id INTEGER NOT NULL, name VARCHAR NOT NULL, email VARCHAR DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
     )
     db.commit()
@@ -249,6 +269,52 @@ def dashboard(db: Session = Depends(get_db)):
 @app.get("/quarantine", response_model=List[QuarantineOut])
 def get_quarantine(db: Session = Depends(get_db)):
     return db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
+
+
+@app.get("/stewardship", response_model=List[StewardshipOut])
+def get_stewardship_records(db: Session = Depends(get_db)):
+    return db.query(StewardshipQueue).order_by(StewardshipQueue.id.asc()).all()
+
+
+@app.post("/stewardship/approve")
+def approve_stewardship_record(
+    payload: StewardshipActionRequest,
+    db: Session = Depends(get_db),
+):
+    record = db.query(StewardshipQueue).filter(StewardshipQueue.id == payload.id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Stewardship record not found")
+
+    if record.status == "approved":
+        return {"message": "Record is already approved", "record": record}
+
+    db.add(
+        MasterData(
+            source_queue_id=record.id,
+            name=record.name,
+            email=record.email,
+            created_at=datetime.utcnow(),
+        )
+    )
+    record.status = "approved"
+    db.commit()
+    db.refresh(record)
+    return {"message": "Record approved and moved to master data", "record": record}
+
+
+@app.post("/stewardship/reject")
+def reject_stewardship_record(
+    payload: StewardshipActionRequest,
+    db: Session = Depends(get_db),
+):
+    record = db.query(StewardshipQueue).filter(StewardshipQueue.id == payload.id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Stewardship record not found")
+
+    record.status = "rejected"
+    db.commit()
+    db.refresh(record)
+    return {"message": "Record rejected", "record": record}
 
 
 @app.get("/quarantine/paged", response_model=QuarantinePageOut)

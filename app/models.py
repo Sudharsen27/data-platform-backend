@@ -58,3 +58,23 @@ class PipelineRun(Base):
     records_processed = Column(Integer, nullable=False, default=0)
     start_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)
+
+
+class StewardshipQueue(Base):
+    __tablename__ = "stewardship_queue"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, default="")
+    issue = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="pending")
+
+
+class MasterData(Base):
+    __tablename__ = "master_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_queue_id = Column(Integer, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
