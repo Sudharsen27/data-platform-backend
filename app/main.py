@@ -1,13 +1,12 @@
 import os
 from csv import writer
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from io import StringIO
 from typing import List
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from jose import jwt
@@ -45,8 +44,10 @@ from app.services.sync_scheduler import (
     disable_sync_schedule,
     get_scheduler_state,
 )
+from app.routes.auth import router as auth_router
 
 app = FastAPI()
+app.include_router(auth_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [
@@ -69,14 +70,6 @@ Base.metadata.create_all(bind=engine)
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "mdm-secret-key-change-this")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-HARDCODED_EMAIL = "admin@mdm.com"
-HARDCODED_PASSWORD = "admin123"
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
 
 def get_user_id_from_request(request: Request):
@@ -211,18 +204,6 @@ def health_check(db: Session = Depends(get_db)):
         "snowflake": snowflake_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
-@app.post("/auth/login")
-def login(payload: LoginRequest):
-    if payload.email != HARDCODED_EMAIL or payload.password != HARDCODED_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    token_payload = {"sub": payload.email, "exp": expire}
-    access_token = jwt.encode(token_payload, SECRET_KEY, algorithm=ALGORITHM)
-
-    return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.get("/dashboard")
