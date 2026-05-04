@@ -45,7 +45,8 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, default="unknown")
-    field_changed = Column(String, nullable=False)
+    action = Column(String, nullable=False, default="unknown")
+    entity = Column(String, nullable=False, default="")
     old_value = Column(String, nullable=False, default="")
     new_value = Column(String, nullable=False, default="")
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)

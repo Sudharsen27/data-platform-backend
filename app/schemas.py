@@ -73,7 +73,8 @@ class SchedulerToggleRequest(BaseModel):
 class AuditLogOut(BaseModel):
     id: int
     user_id: str
-    field_changed: str
+    action: str
+    entity: str
     old_value: str
     new_value: str
     timestamp: datetime

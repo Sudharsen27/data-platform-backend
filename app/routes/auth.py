@@ -1,19 +1,24 @@
 import os
-from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
-from jose import jwt
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
+from app.utils.jwt import create_access_token
 from app.utils.security import hash_password, verify_password
 
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 router = APIRouter(prefix="/auth", tags=["auth"])
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "mdm-secret-key-change-this")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+
+def _admin_email_set() -> set[str]:
+    raw = os.getenv("ADMIN_EMAILS", "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
 
 class LoginRequest(BaseModel):
@@ -28,6 +33,18 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+def _user_public(user: User) -> dict:
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "company_name": user.company_name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
 @router.post("/login")
 def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
     email = payload.email.strip().lower()
@@ -38,17 +55,43 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
         )
 
     user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail="Invalid email",
         )
 
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    token_payload = {"sub": user.email, "exp": expire}
-    access_token = jwt.encode(token_payload, SECRET_KEY, algorithm=ALGORITHM)
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Wrong password",
+        )
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+
+    # Keep DB in sync with ADMIN_EMAILS (no server restart needed)
+    admin_emails = _admin_email_set()
+    if email in admin_emails and (user.role or "").lower() != "admin":
+        user.role = "admin"
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    access_token = create_access_token(
+        subject=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        full_name=user.full_name,
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": _user_public(user),
+    }
 
 
 @router.post("/register")
@@ -56,6 +99,8 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
     full_name = payload.full_name.strip()
     email = payload.email.strip().lower()
     company_name = payload.company_name.strip() if payload.company_name else None
+    admin_emails = _admin_email_set()
+    role = "admin" if email in admin_emails else "user"
 
     if not full_name:
         raise HTTPException(
@@ -85,6 +130,7 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
         email=email,
         company_name=company_name,
         password_hash=hash_password(payload.password),
+        role=role,
     )
     db.add(user)
     db.commit()
@@ -92,11 +138,5 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
 
     return {
         "message": "User registered successfully",
-        "user": {
-            "id": user.id,
-            "full_name": user.full_name,
-            "email": user.email,
-            "company_name": user.company_name,
-            "created_at": user.created_at.isoformat(),
-        },
+        "user": _user_public(user),
     }

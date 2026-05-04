@@ -9,20 +9,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from jose import jwt
+from jose import JWTError
 
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (
-    AuditLog,
     MasterData,
     PipelineRun,
     QuarantineData,
     Rule,
     StewardshipQueue,
     SyncJob,
+    User,
 )
 from app.schemas import (
-    AuditLogOut,
     PipelineRunOut,
     QuarantinePageOut,
     QuarantineOut,
@@ -45,9 +44,16 @@ from app.services.sync_scheduler import (
     get_scheduler_state,
 )
 from app.routes.auth import router as auth_router
+from app.routes.audit import router as audit_router
+from app.routes.users import router as users_router
+from app.deps.auth import get_current_user, require_admin
+from app.services.audit_log import write_audit_log
+from app.utils.jwt import verify_token
 
 app = FastAPI()
 app.include_router(auth_router)
+app.include_router(audit_router)
+app.include_router(users_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [
@@ -68,9 +74,6 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "mdm-secret-key-change-this")
-ALGORITHM = "HS256"
-
 
 def get_user_id_from_request(request: Request):
     auth_header = request.headers.get("Authorization", "")
@@ -82,13 +85,65 @@ def get_user_id_from_request(request: Request):
         return "unknown"
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub", "unknown")
-    except Exception:
+        payload = verify_token(token)
+        return payload.get("sub") or "unknown"
+    except JWTError:
         return "unknown"
 
 
 def seed_data(db: Session):
+    db.execute(
+        text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'user'"
+        )
+    )
+    db.commit()
+
+    admin_emails = [
+        part.strip().lower()
+        for part in os.getenv("ADMIN_EMAILS", "").split(",")
+        if part.strip()
+    ]
+    for admin_email in admin_emails:
+        db.execute(
+            text("UPDATE users SET role = 'admin' WHERE LOWER(email) = :email"),
+            {"email": admin_email},
+        )
+    db.commit()
+
+    db.execute(
+        text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true"
+        )
+    )
+    db.commit()
+
+    db.execute(
+        text(
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS action VARCHAR(64) DEFAULT 'unknown'"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS entity VARCHAR(128) DEFAULT ''"
+        )
+    )
+    db.commit()
+    fc = db.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'audit_logs' AND column_name = 'field_changed'"
+        )
+    ).fetchone()
+    if fc:
+        db.execute(
+            text(
+                "UPDATE audit_logs SET action = 'update', entity = 'quarantine:' || COALESCE(field_changed, '') WHERE COALESCE(field_changed, '') <> '' OR action = 'unknown'"
+            )
+        )
+        db.commit()
+        db.execute(text("ALTER TABLE audit_logs DROP COLUMN IF EXISTS field_changed"))
+        db.commit()
+
     db.execute(
         text(
             "ALTER TABLE rules ADD COLUMN IF NOT EXISTS created_by VARCHAR DEFAULT 'system'"
@@ -252,6 +307,26 @@ def get_quarantine(db: Session = Depends(get_db)):
     return db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
 
 
+@app.get("/quarantine/export")
+def export_quarantine_table_csv(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    rows = db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
+    buffer = StringIO()
+    csv_writer = writer(buffer)
+    csv_writer.writerow(["id", "name", "email", "error", "match_status"])
+    for row in rows:
+        csv_writer.writerow([row.id, row.name, row.email, row.error, row.match_status])
+
+    buffer.seek(0)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=quarantine_records.csv"},
+    )
+
+
 @app.get("/stewardship", response_model=List[StewardshipOut])
 def get_stewardship_records(db: Session = Depends(get_db)):
     return db.query(StewardshipQueue).order_by(StewardshipQueue.id.asc()).all()
@@ -323,14 +398,14 @@ def get_quarantine_paged(
 @app.post("/quarantine/update")
 def update_quarantine(
     payload: QuarantineUpdate,
-    request: Request,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
 ):
     record = db.query(QuarantineData).filter(QuarantineData.id == payload.id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    user_id = get_user_id_from_request(request)
+    user_id = current_user.email
     changed_fields = []
 
     if record.name != payload.name:
@@ -345,14 +420,13 @@ def update_quarantine(
     record.error = payload.error
 
     for field_name, old_value, new_value in changed_fields:
-        db.add(
-            AuditLog(
-                user_id=user_id,
-                field_changed=field_name,
-                old_value=str(old_value or ""),
-                new_value=str(new_value or ""),
-                timestamp=datetime.utcnow(),
-            )
+        write_audit_log(
+            db,
+            user_id=user_id,
+            action="update",
+            entity=f"quarantine:{payload.id}/{field_name}",
+            old_value=str(old_value or ""),
+            new_value=str(new_value or ""),
         )
 
     db.commit()
@@ -362,47 +436,94 @@ def update_quarantine(
 
 
 @app.get("/rules", response_model=List[RuleOut])
-def get_rules(db: Session = Depends(get_db)):
+def get_rules(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     return db.query(Rule).order_by(Rule.id.asc()).all()
 
 
 @app.post("/rules")
 @app.post("/rules/add")
-def add_rule(payload: RuleCreate, db: Session = Depends(get_db)):
+def add_rule(
+    payload: RuleCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     new_rule = Rule(
         field=payload.field,
         rule=payload.rule,
         status=payload.status,
-        created_by=payload.created_by,
+        created_by=payload.created_by or current_user.email,
         updated_at=datetime.utcnow(),
     )
     db.add(new_rule)
     db.commit()
     db.refresh(new_rule)
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="create",
+        entity=f"rule:{new_rule.id}",
+        old_value="",
+        new_value=f"field={new_rule.field}; status={new_rule.status}; text={new_rule.rule[:200]}",
+    )
+    db.commit()
     return {"message": "Rule added successfully", "rule": new_rule}
 
 
 @app.post("/rules/update")
-def update_rule(payload: RuleUpdate, db: Session = Depends(get_db)):
+def update_rule(
+    payload: RuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     rule_item = db.query(Rule).filter(Rule.id == payload.id).first()
     if not rule_item:
         raise HTTPException(status_code=404, detail="Rule not found")
 
+    old_value = (
+        f"field={rule_item.field}; status={rule_item.status}; text={rule_item.rule[:200]}"
+    )
     rule_item.field = payload.field
     rule_item.rule = payload.rule
     rule_item.status = payload.status
     rule_item.updated_at = datetime.utcnow()
+    new_value = f"field={rule_item.field}; status={rule_item.status}; text={rule_item.rule[:200]}"
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="update",
+        entity=f"rule:{payload.id}",
+        old_value=old_value,
+        new_value=new_value,
+    )
     db.commit()
     db.refresh(rule_item)
     return {"message": "Rule updated successfully", "rule": rule_item}
 
 
 @app.delete("/rules/{rule_id}")
-def delete_rule(rule_id: int, db: Session = Depends(get_db)):
+def delete_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     rule_item = db.query(Rule).filter(Rule.id == rule_id).first()
     if not rule_item:
         raise HTTPException(status_code=404, detail="Rule not found")
 
+    old_value = (
+        f"field={rule_item.field}; status={rule_item.status}; text={rule_item.rule[:200]}"
+    )
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="delete",
+        entity=f"rule:{rule_id}",
+        old_value=old_value,
+        new_value="",
+    )
     db.delete(rule_item)
     db.commit()
     return {"message": "Rule deleted successfully"}
@@ -500,19 +621,27 @@ def export_analytics_csv():
     )
 
 
-@app.get("/audit/logs", response_model=List[AuditLogOut])
-def get_audit_logs(db: Session = Depends(get_db)):
-    return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(100).all()
-
-
 @app.post("/pipeline/run")
-def trigger_pipeline_run(db: Session = Depends(get_db)):
+def trigger_pipeline_run(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     state = get_pipeline_state()
     if state["status"] == "running":
         raise HTTPException(status_code=409, detail="Pipeline is already running")
 
     try:
-        return run_pipeline(db)
+        result = run_pipeline(db)
+        write_audit_log(
+            db,
+            user_id=current_user.email,
+            action="pipeline_run",
+            entity="pipeline",
+            old_value="",
+            new_value=str(result)[:2000],
+        )
+        db.commit()
+        return result
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error))
     except Exception as error:
