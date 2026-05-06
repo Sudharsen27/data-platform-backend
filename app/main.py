@@ -49,6 +49,7 @@ from app.routes.users import router as users_router
 from app.deps.auth import get_current_user, require_admin
 from app.services.audit_log import write_audit_log
 from app.utils.jwt import verify_token
+from app.utils.security import hash_password
 
 app = FastAPI()
 app.include_router(auth_router)
@@ -104,6 +105,31 @@ def seed_data(db: Session):
         for part in os.getenv("ADMIN_EMAILS", "").split(",")
         if part.strip()
     ]
+
+    # Optional bootstrap user creation for empty prod DBs.
+    # Set ADMIN_BOOTSTRAP_PASSWORD to enable automatic admin account creation.
+    bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD", "").strip()
+    for admin_email in admin_emails:
+        existing_admin_user = (
+            db.query(User).filter(User.email.ilike(admin_email)).first()
+        )
+        if existing_admin_user:
+            continue
+        if not bootstrap_password:
+            continue
+
+        db.add(
+            User(
+                full_name="Platform Admin",
+                email=admin_email,
+                company_name="",
+                password_hash=hash_password(bootstrap_password),
+                role="admin",
+                is_active=True,
+            )
+        )
+    db.commit()
+
     for admin_email in admin_emails:
         db.execute(
             text("UPDATE users SET role = 'admin' WHERE LOWER(email) = :email"),
