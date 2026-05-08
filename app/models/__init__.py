@@ -82,8 +82,44 @@ class MasterData(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class LineageNode(Base):
+    __tablename__ = "lineage_nodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, nullable=False, unique=True, index=True)
+    label = Column(String, nullable=False)
+    node_type = Column(String, nullable=False, default="dataset")
+    system = Column(String, nullable=False, default="")
+    layer = Column(String, nullable=False, default="")
+
+
+class LineageEdge(Base):
+    __tablename__ = "lineage_edges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_key = Column(String, nullable=False, index=True)
+    target_key = Column(String, nullable=False, index=True)
+    transformation = Column(String, nullable=False, default="")
+    criticality = Column(String, nullable=False, default="medium")
+
+
+class AICopilotActionLog(Base):
+    __tablename__ = "ai_copilot_action_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    action_key = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=False, default="unknown")
+    status = Column(String, nullable=False, default="success")
+    summary = Column(String, nullable=False, default="")
+    payload = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 __all__ = [
+    "AICopilotActionLog",
     "AuditLog",
+    "LineageEdge",
+    "LineageNode",
     "MasterData",
     "PipelineRun",
     "QuarantineData",

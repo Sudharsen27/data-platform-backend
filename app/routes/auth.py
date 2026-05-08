@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.utils.jwt import create_access_token
+from app.utils.jwt import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, create_refresh_token, verify_token
 from app.utils.security import hash_password, verify_password
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -31,6 +31,10 @@ class RegisterRequest(BaseModel):
     email: str
     company_name: str | None = None
     password: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 def _user_public(user: User) -> dict:
@@ -87,8 +91,14 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
         is_active=user.is_active,
         full_name=user.full_name,
     )
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        role=user.role,
+    )
     return {
         "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "token_type": "bearer",
         "user": _user_public(user),
     }
@@ -139,4 +149,52 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
     return {
         "message": "User registered successfully",
         "user": _user_public(user),
+    }
+
+
+@router.post("/refresh")
+def refresh_access_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
+    token = (payload.refresh_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Refresh token is required",
+        )
+    try:
+        claims = verify_token(token)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        )
+
+    if claims.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+        )
+
+    email = (claims.get("sub") or "").strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated",
+        )
+
+    new_access_token = create_access_token(
+        subject=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        full_name=user.full_name,
+    )
+    return {
+        "access_token": new_access_token,
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "token_type": "bearer",
     }

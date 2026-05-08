@@ -1,4 +1,5 @@
 import os
+from time import perf_counter
 from csv import writer
 from datetime import datetime, timezone
 from io import StringIO
@@ -14,6 +15,8 @@ from jose import JWTError
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (
     MasterData,
+    LineageEdge,
+    LineageNode,
     PipelineRun,
     QuarantineData,
     Rule,
@@ -22,6 +25,7 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    DashboardOverviewOut,
     PipelineRunOut,
     QuarantinePageOut,
     QuarantineOut,
@@ -34,6 +38,7 @@ from app.schemas import (
     StewardshipOut,
     SyncJobOut,
 )
+from app.services.ai_insights import build_ai_insights
 from app.services.snowflake_analytics import get_quarantine_analytics
 from app.db.snowflake import get_snowflake_connection
 from app.services.pipeline import get_pipeline_state, run_pipeline
@@ -46,6 +51,8 @@ from app.services.sync_scheduler import (
 from app.routes.auth import router as auth_router
 from app.routes.audit import router as audit_router
 from app.routes.users import router as users_router
+from app.routes.lineage import router as lineage_router
+from app.routes.ai import router as ai_router
 from app.deps.auth import get_current_user, require_admin
 from app.services.audit_log import write_audit_log
 from app.utils.jwt import verify_token
@@ -55,6 +62,8 @@ app = FastAPI()
 app.include_router(auth_router)
 app.include_router(audit_router)
 app.include_router(users_router)
+app.include_router(lineage_router)
+app.include_router(ai_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [
@@ -72,6 +81,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    start = perf_counter()
+    response = await call_next(request)
+    duration_ms = round((perf_counter() - start) * 1000, 2)
+    response.headers["X-Response-Time-Ms"] = str(duration_ms)
+    return response
 
 Base.metadata.create_all(bind=engine)
 
@@ -195,6 +213,16 @@ def seed_data(db: Session):
             "CREATE TABLE IF NOT EXISTS master_data (id SERIAL PRIMARY KEY, source_queue_id INTEGER NOT NULL, name VARCHAR NOT NULL, email VARCHAR DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
     )
+    db.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS lineage_nodes (id SERIAL PRIMARY KEY, key VARCHAR NOT NULL UNIQUE, label VARCHAR NOT NULL, node_type VARCHAR NOT NULL DEFAULT 'dataset', system VARCHAR NOT NULL DEFAULT '', layer VARCHAR NOT NULL DEFAULT '')"
+        )
+    )
+    db.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS lineage_edges (id SERIAL PRIMARY KEY, source_key VARCHAR NOT NULL, target_key VARCHAR NOT NULL, transformation VARCHAR NOT NULL DEFAULT '', criticality VARCHAR NOT NULL DEFAULT 'medium')"
+        )
+    )
     db.commit()
 
     quarantine_count = db.execute(text("SELECT COUNT(*) FROM quarantine_data")).scalar()
@@ -218,6 +246,66 @@ def seed_data(db: Session):
                 Rule(field="email", rule="Email cannot be null", status="active"),
                 Rule(field="name", rule="Name must be at least 2 chars", status="active"),
                 Rule(field="phone", rule="Phone format must be valid", status="inactive"),
+            ]
+        )
+
+    lineage_nodes_count = db.execute(text("SELECT COUNT(*) FROM lineage_nodes")).scalar()
+    if lineage_nodes_count == 0:
+        db.add_all(
+            [
+                LineageNode(
+                    key="crm.customers_raw",
+                    label="CRM Customers Raw",
+                    node_type="table",
+                    system="CRM",
+                    layer="source",
+                ),
+                LineageNode(
+                    key="staging.customers_clean",
+                    label="Customers Clean",
+                    node_type="table",
+                    system="Postgres",
+                    layer="staging",
+                ),
+                LineageNode(
+                    key="mdm.customer_master",
+                    label="Customer Master",
+                    node_type="table",
+                    system="MDM",
+                    layer="golden",
+                ),
+                LineageNode(
+                    key="bi.customer_360",
+                    label="Customer 360 Mart",
+                    node_type="table",
+                    system="Analytics",
+                    layer="consumption",
+                ),
+            ]
+        )
+
+    lineage_edges_count = db.execute(text("SELECT COUNT(*) FROM lineage_edges")).scalar()
+    if lineage_edges_count == 0:
+        db.add_all(
+            [
+                LineageEdge(
+                    source_key="crm.customers_raw",
+                    target_key="staging.customers_clean",
+                    transformation="standardize_email, trim_name",
+                    criticality="high",
+                ),
+                LineageEdge(
+                    source_key="staging.customers_clean",
+                    target_key="mdm.customer_master",
+                    transformation="match_merge_survivorship",
+                    criticality="high",
+                ),
+                LineageEdge(
+                    source_key="mdm.customer_master",
+                    target_key="bi.customer_360",
+                    transformation="aggregate_profile_metrics",
+                    criticality="medium",
+                ),
             ]
         )
 
@@ -249,9 +337,13 @@ def home():
 def health_check(db: Session = Depends(get_db)):
     database_status = "ok"
     snowflake_status = "skipped"
+    database_latency_ms = None
+    snowflake_latency_ms = None
 
     try:
+        db_start = perf_counter()
         db.execute(text("SELECT 1"))
+        database_latency_ms = round((perf_counter() - db_start) * 1000, 2)
     except Exception:
         database_status = "failed"
 
@@ -262,6 +354,7 @@ def health_check(db: Session = Depends(get_db)):
     ]
     if all(snowflake_required):
         try:
+            sf_start = perf_counter()
             connection = get_snowflake_connection()
             try:
                 cursor = connection.cursor()
@@ -271,6 +364,7 @@ def health_check(db: Session = Depends(get_db)):
                 cursor.close()
                 connection.close()
             snowflake_status = "ok"
+            snowflake_latency_ms = round((perf_counter() - sf_start) * 1000, 2)
         except Exception:
             snowflake_status = "failed"
 
@@ -282,7 +376,9 @@ def health_check(db: Session = Depends(get_db)):
         "status": overall_status,
         "api": "ok",
         "database": database_status,
+        "database_latency_ms": database_latency_ms,
         "snowflake": snowflake_status,
+        "snowflake_latency_ms": snowflake_latency_ms,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -325,6 +421,48 @@ def dashboard(db: Session = Depends(get_db)):
             {"type": item["error"], "count": item["count"]}
             for item in analytics["error_distribution"]
         ],
+    }
+
+
+@app.get("/dashboard/overview", response_model=DashboardOverviewOut)
+def dashboard_overview(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    latest_job = db.query(SyncJob).order_by(SyncJob.id.desc()).first()
+    scheduler_state = get_scheduler_state()
+    analytics = get_quarantine_analytics()
+    lineage_nodes = db.query(LineageNode).order_by(LineageNode.id.asc()).all()
+    lineage_edges = db.query(LineageEdge).order_by(LineageEdge.id.asc()).all()
+    stewardship_items = (
+        db.query(StewardshipQueue).order_by(StewardshipQueue.id.desc()).limit(8).all()
+    )
+    recent_jobs = db.query(SyncJob).order_by(SyncJob.id.desc()).limit(8).all()
+    pipeline_status = get_pipeline_state()
+
+    return {
+        "kpis": {
+            "success_rate": analytics.get("success_rate", 0),
+            "failed_records": analytics.get("failed_records", 0),
+            "active_jobs": 1 if scheduler_state.get("enabled") else 0,
+        },
+        "last_sync_job": {
+            "status": latest_job.status,
+            "start_time": latest_job.start_time,
+            "end_time": latest_job.end_time,
+            "quarantine_rows_synced": latest_job.quarantine_rows_synced,
+            "rules_synced": latest_job.rules_synced,
+        }
+        if latest_job
+        else None,
+        "pipeline_status": pipeline_status,
+        "recent_jobs": recent_jobs,
+        "lineage": {
+            "nodes": lineage_nodes,
+            "edges": lineage_edges,
+        },
+        "stewardship": stewardship_items,
+        "ai_insights": build_ai_insights(db),
     }
 
 

@@ -107,3 +107,57 @@ class StewardshipOut(BaseModel):
 
 class StewardshipActionRequest(BaseModel):
     id: int
+
+
+class LineageNodeOut(BaseModel):
+    id: int
+    key: str
+    label: str
+    node_type: str
+    system: str
+    layer: str
+
+    class Config:
+        from_attributes = True
+
+
+class LineageEdgeOut(BaseModel):
+    id: int
+    source_key: str
+    target_key: str
+    transformation: str
+    criticality: str
+
+    class Config:
+        from_attributes = True
+
+
+class LineageGraphOut(BaseModel):
+    nodes: list[LineageNodeOut]
+    edges: list[LineageEdgeOut]
+
+
+class AICopilotInsightOut(BaseModel):
+    title: str
+    detail: str
+    priority: str
+
+
+class AICopilotInsightsResponse(BaseModel):
+    items: list[AICopilotInsightOut]
+
+
+class AICopilotActionResponse(BaseModel):
+    action: str
+    summary: str
+    details: list[str] = []
+
+
+class DashboardOverviewOut(BaseModel):
+    kpis: dict
+    last_sync_job: dict | None = None
+    pipeline_status: dict
+    recent_jobs: list[SyncJobOut]
+    lineage: LineageGraphOut
+    stewardship: list[StewardshipOut]
+    ai_insights: list[AICopilotInsightOut]

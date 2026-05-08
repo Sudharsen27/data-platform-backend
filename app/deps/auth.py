@@ -6,6 +6,25 @@ from app.database import get_db
 from app.models import User
 from app.utils.jwt import verify_token
 
+ROLE_PERMISSIONS = {
+    "admin": {
+        "dashboard:read",
+        "lineage:read",
+        "rules:read",
+        "rules:write",
+        "pipeline:run",
+        "users:manage",
+        "audit:read",
+        "stewardship:manage",
+    },
+    "user": {
+        "dashboard:read",
+        "lineage:read",
+        "rules:read",
+        "audit:read",
+    },
+}
+
 
 def get_bearer_token(authorization: str | None = Header(default=None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
@@ -63,3 +82,17 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
             detail="Admin access required",
         )
     return user
+
+
+def require_permission(permission: str):
+    def checker(user: User = Depends(get_current_user)) -> User:
+        role = (user.role or "user").lower()
+        allowed = ROLE_PERMISSIONS.get(role, set())
+        if permission not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission required: {permission}",
+            )
+        return user
+
+    return checker

@@ -8,3 +8,4 @@ passlib[bcrypt]
 snowflake-connector-python
 apscheduler
 python-dotenv
+alembic
