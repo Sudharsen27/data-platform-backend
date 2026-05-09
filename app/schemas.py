@@ -105,8 +105,28 @@ class StewardshipOut(BaseModel):
         from_attributes = True
 
 
+class StewardshipPageOut(BaseModel):
+    items: list[StewardshipOut]
+    total: int
+    offset: int
+    limit: int
+    pending_total: int
+
+
 class StewardshipActionRequest(BaseModel):
     id: int
+
+
+class StewardshipBulkActionRequest(BaseModel):
+    ids: list[int]
+
+
+class StewardshipBulkOutcome(BaseModel):
+    """Result of bulk approve or reject."""
+
+    success_count: int
+    skipped_not_pending: int
+    missing_count: int
 
 
 class LineageNodeOut(BaseModel):
@@ -161,3 +181,27 @@ class DashboardOverviewOut(BaseModel):
     lineage: LineageGraphOut
     stewardship: list[StewardshipOut]
     ai_insights: list[AICopilotInsightOut]
+
+
+class CatalogAssetBase(BaseModel):
+    asset_key: str
+    name: str
+    asset_type: str = "table"
+    domain: str = ""
+    owner_email: str = ""
+    description: str = ""
+    tags: str = ""
+    pii_tier: str = "internal"
+    lineage_node_key: str = ""
+
+
+class CatalogAssetCreate(CatalogAssetBase):
+    pass
+
+
+class CatalogAssetOut(CatalogAssetBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

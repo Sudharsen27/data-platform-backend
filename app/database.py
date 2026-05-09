@@ -12,7 +12,16 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg2://postgres:postgres@localhost:5432/mdm_platform",
 )
 
-engine = create_engine(DATABASE_URL)
+# Fail fast when Postgres is down instead of hanging the API for minutes.
+_connect_args = {}
+if DATABASE_URL.startswith("postgresql"):
+    _connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args=_connect_args or {},
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

@@ -10,6 +10,8 @@ ROLE_PERMISSIONS = {
     "admin": {
         "dashboard:read",
         "lineage:read",
+        "catalog:read",
+        "catalog:write",
         "rules:read",
         "rules:write",
         "pipeline:run",
@@ -20,8 +22,10 @@ ROLE_PERMISSIONS = {
     "user": {
         "dashboard:read",
         "lineage:read",
+        "catalog:read",
         "rules:read",
         "audit:read",
+        "stewardship:manage",
     },
 }
 

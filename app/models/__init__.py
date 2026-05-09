@@ -69,7 +69,7 @@ class StewardshipQueue(Base):
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, default="")
     issue = Column(String, nullable=False, default="")
-    status = Column(String, nullable=False, default="pending")
+    status = Column(String, nullable=False, default="pending", index=True)
 
 
 class MasterData(Base):
@@ -115,8 +115,27 @@ class AICopilotActionLog(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class CatalogAsset(Base):
+    """Registered data asset for discovery and governance (catalog)."""
+
+    __tablename__ = "catalog_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset_key = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=False)
+    asset_type = Column(String, nullable=False, default="table")
+    domain = Column(String, nullable=False, default="")
+    owner_email = Column(String, nullable=False, default="")
+    description = Column(String, nullable=False, default="")
+    tags = Column(String, nullable=False, default="")
+    pii_tier = Column(String, nullable=False, default="internal")
+    lineage_node_key = Column(String, nullable=False, default="", index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 __all__ = [
     "AICopilotActionLog",
+    "CatalogAsset",
     "AuditLog",
     "LineageEdge",
     "LineageNode",

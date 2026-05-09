@@ -203,7 +203,22 @@ def run_pipeline(db: Session):
                 record.error = transformed_error
                 final_status = match_status
 
-                if 50 <= match_confidence <= 80:
+                # Stewardship: not only "medium" scores. Clean name+valid email => confidence 100
+                # and status "merged", so a 1M row load often produced zero queue rows before.
+                needs_stewardship = (
+                    match_status == "review"
+                    or (50 <= match_confidence <= 80)
+                    or (match_status == "merged" and bool(transformed_error))
+                )
+                if needs_stewardship:
+                    if transformed_error:
+                        issue_text = transformed_error
+                    elif match_status == "review":
+                        issue_text = (
+                            "Review needed: identity could not be auto-merged (e.g. invalid email)."
+                        )
+                    else:
+                        issue_text = "Review needed for moderate confidence match."
                     existing_item = (
                         db.query(StewardshipQueue)
                         .filter(StewardshipQueue.id == record.id)
@@ -215,17 +230,14 @@ def run_pipeline(db: Session):
                                 id=record.id,
                                 name=record.name,
                                 email=record.email,
-                                issue=transformed_error or "Review needed for moderate confidence match.",
+                                issue=issue_text,
                                 status="pending",
                             )
                         )
                     else:
                         existing_item.name = record.name
                         existing_item.email = record.email
-                        existing_item.issue = (
-                            transformed_error
-                            or "Review needed for moderate confidence match."
-                        )
+                        existing_item.issue = issue_text
                         existing_item.status = "pending"
                     stewardship_count += 1
                     final_status = "stewardship"

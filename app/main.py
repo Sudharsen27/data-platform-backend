@@ -14,6 +14,7 @@ from jose import JWTError
 
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (
+    CatalogAsset,
     MasterData,
     LineageEdge,
     LineageNode,
@@ -35,7 +36,10 @@ from app.schemas import (
     RuleUpdate,
     SchedulerToggleRequest,
     StewardshipActionRequest,
+    StewardshipBulkActionRequest,
+    StewardshipBulkOutcome,
     StewardshipOut,
+    StewardshipPageOut,
     SyncJobOut,
 )
 from app.services.ai_insights import build_ai_insights
@@ -53,7 +57,8 @@ from app.routes.audit import router as audit_router
 from app.routes.users import router as users_router
 from app.routes.lineage import router as lineage_router
 from app.routes.ai import router as ai_router
-from app.deps.auth import get_current_user, require_admin
+from app.routes.catalog import router as catalog_router
+from app.deps.auth import get_current_user, require_admin, require_permission
 from app.services.audit_log import write_audit_log
 from app.utils.jwt import verify_token
 from app.utils.security import hash_password
@@ -64,6 +69,7 @@ app.include_router(audit_router)
 app.include_router(users_router)
 app.include_router(lineage_router)
 app.include_router(ai_router)
+app.include_router(catalog_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [
@@ -309,6 +315,76 @@ def seed_data(db: Session):
             ]
         )
 
+    db.execute(
+        text(
+            "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS lineage_node_key VARCHAR NOT NULL DEFAULT ''"
+        )
+    )
+    db.commit()
+    db.execute(
+        text(
+            """
+            UPDATE catalog_assets AS ca
+            SET lineage_node_key = ca.asset_key
+            FROM lineage_nodes AS ln
+            WHERE (ca.lineage_node_key IS NULL OR ca.lineage_node_key = '')
+              AND ln.key = ca.asset_key
+            """
+        )
+    )
+    db.commit()
+
+    catalog_count = db.execute(text("SELECT COUNT(*) FROM catalog_assets")).scalar()
+    if catalog_count == 0:
+        db.add_all(
+            [
+                CatalogAsset(
+                    asset_key="crm.customers_raw",
+                    name="CRM Customers Raw",
+                    asset_type="table",
+                    domain="Customer",
+                    owner_email="steward-customer@example.com",
+                    description="Raw customer feed from CRM before MDM processing.",
+                    tags="crm,source,pii",
+                    pii_tier="confidential",
+                    lineage_node_key="crm.customers_raw",
+                ),
+                CatalogAsset(
+                    asset_key="staging.customers_clean",
+                    name="Customers Clean",
+                    asset_type="table",
+                    domain="Customer",
+                    owner_email="steward-customer@example.com",
+                    description="Standardized customer attributes in staging.",
+                    tags="staging,mdm",
+                    pii_tier="confidential",
+                    lineage_node_key="staging.customers_clean",
+                ),
+                CatalogAsset(
+                    asset_key="mdm.customer_master",
+                    name="Customer Master",
+                    asset_type="table",
+                    domain="Customer",
+                    owner_email="governance-admin@example.com",
+                    description="Golden customer master used across the enterprise.",
+                    tags="golden,mdm,authoritative",
+                    pii_tier="restricted",
+                    lineage_node_key="mdm.customer_master",
+                ),
+                CatalogAsset(
+                    asset_key="bi.customer_360",
+                    name="Customer 360 Mart",
+                    asset_type="view",
+                    domain="Analytics",
+                    owner_email="analytics-owner@example.com",
+                    description="Downstream mart for analytics and reporting.",
+                    tags="bi,consumption",
+                    pii_tier="confidential",
+                    lineage_node_key="bi.customer_360",
+                ),
+            ]
+        )
+
     db.commit()
 
 
@@ -491,15 +567,128 @@ def export_quarantine_table_csv(
     )
 
 
-@app.get("/stewardship", response_model=List[StewardshipOut])
-def get_stewardship_records(db: Session = Depends(get_db)):
-    return db.query(StewardshipQueue).order_by(StewardshipQueue.id.asc()).all()
+_ALLOWED_STEWARDSHIP_STATUS = frozenset({"all", "pending", "approved", "rejected"})
+_STEWARDSHIP_BULK_MAX_IDS = 500
+_STEWARDSHIP_EXPORT_MAX_ROWS = 100_000
+
+
+def _stewardship_status_param(status: str) -> str:
+    raw = (status or "pending").strip().lower()
+    if raw not in _ALLOWED_STEWARDSHIP_STATUS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of: {', '.join(sorted(_ALLOWED_STEWARDSHIP_STATUS))}",
+        )
+    return raw
+
+
+def _filtered_stewardship_query(db: Session, raw_status: str):
+    q = db.query(StewardshipQueue)
+    if raw_status != "all":
+        q = q.filter(StewardshipQueue.status == raw_status)
+    return q
+
+
+def _normalize_bulk_ids(ids: list[int]) -> list[int]:
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(ids) > _STEWARDSHIP_BULK_MAX_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {_STEWARDSHIP_BULK_MAX_IDS} ids per bulk request",
+        )
+    seen = set()
+    out = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+@app.get("/stewardship", response_model=StewardshipPageOut)
+def get_stewardship_records(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    status: str = Query(
+        "pending",
+        description="Filter: all, pending, approved, rejected (default pending)",
+    ),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("stewardship:manage")),
+):
+    raw = _stewardship_status_param(status)
+    total = _filtered_stewardship_query(db, raw).count()
+    items = (
+        _filtered_stewardship_query(db, raw)
+        .order_by(StewardshipQueue.id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    pending_total = (
+        db.query(StewardshipQueue).filter(StewardshipQueue.status == "pending").count()
+    )
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "pending_total": pending_total,
+    }
+
+
+@app.get("/stewardship/export")
+def export_stewardship_csv(
+    status: str = Query(
+        "pending",
+        description="Same as list filter: all, pending, approved, rejected",
+    ),
+    max_rows: int = Query(
+        50_000,
+        ge=1,
+        le=_STEWARDSHIP_EXPORT_MAX_ROWS,
+        description="Cap export size (max 100000)",
+    ),
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("stewardship:manage")),
+):
+    raw = _stewardship_status_param(status)
+    rows = (
+        _filtered_stewardship_query(db, raw)
+        .order_by(StewardshipQueue.id.asc())
+        .limit(max_rows)
+        .all()
+    )
+    buffer = StringIO()
+    csv_writer = writer(buffer)
+    csv_writer.writerow(["id", "name", "email", "issue", "status"])
+    for row in rows:
+        csv_writer.writerow([row.id, row.name, row.email, row.issue, row.status])
+    buffer.seek(0)
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="stewardship_export_csv",
+        entity="stewardship_queue",
+        old_value=f"filter={raw}",
+        new_value=f"rows={len(rows)} max_rows={max_rows}",
+    )
+    db.commit()
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="stewardship_queue_export.csv"',
+        },
+    )
 
 
 @app.post("/stewardship/approve")
 def approve_stewardship_record(
     payload: StewardshipActionRequest,
     db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("stewardship:manage")),
 ):
     record = db.query(StewardshipQueue).filter(StewardshipQueue.id == payload.id).first()
     if not record:
@@ -508,6 +697,7 @@ def approve_stewardship_record(
     if record.status == "approved":
         return {"message": "Record is already approved", "record": record}
 
+    prev = record.status
     db.add(
         MasterData(
             source_queue_id=record.id,
@@ -517,6 +707,14 @@ def approve_stewardship_record(
         )
     )
     record.status = "approved"
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="stewardship_approve",
+        entity=f"stewardship_queue:{payload.id}",
+        old_value=prev,
+        new_value="approved",
+    )
     db.commit()
     db.refresh(record)
     return {"message": "Record approved and moved to master data", "record": record}
@@ -526,15 +724,107 @@ def approve_stewardship_record(
 def reject_stewardship_record(
     payload: StewardshipActionRequest,
     db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("stewardship:manage")),
 ):
     record = db.query(StewardshipQueue).filter(StewardshipQueue.id == payload.id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Stewardship record not found")
 
+    prev = record.status
     record.status = "rejected"
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="stewardship_reject",
+        entity=f"stewardship_queue:{payload.id}",
+        old_value=prev,
+        new_value="rejected",
+    )
     db.commit()
     db.refresh(record)
     return {"message": "Record rejected", "record": record}
+
+
+@app.post("/stewardship/bulk-approve", response_model=StewardshipBulkOutcome)
+def bulk_approve_stewardship(
+    payload: StewardshipBulkActionRequest,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("stewardship:manage")),
+):
+    ids = _normalize_bulk_ids(payload.ids)
+    success_count = 0
+    skipped_not_pending = 0
+    missing_count = 0
+    for sid in ids:
+        record = db.query(StewardshipQueue).filter(StewardshipQueue.id == sid).first()
+        if not record:
+            missing_count += 1
+            continue
+        if record.status != "pending":
+            skipped_not_pending += 1
+            continue
+        db.add(
+            MasterData(
+                source_queue_id=record.id,
+                name=record.name,
+                email=record.email,
+                created_at=datetime.utcnow(),
+            )
+        )
+        record.status = "approved"
+        success_count += 1
+    summary = f"bulk_approve success={success_count} skipped={skipped_not_pending} missing={missing_count} id_sample={ids[:20]}"
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="stewardship_bulk_approve",
+        entity="stewardship_queue",
+        old_value=f"n_ids={len(ids)}",
+        new_value=summary[:2000],
+    )
+    db.commit()
+    return {
+        "success_count": success_count,
+        "skipped_not_pending": skipped_not_pending,
+        "missing_count": missing_count,
+    }
+
+
+@app.post("/stewardship/bulk-reject", response_model=StewardshipBulkOutcome)
+def bulk_reject_stewardship(
+    payload: StewardshipBulkActionRequest,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("stewardship:manage")),
+):
+    ids = _normalize_bulk_ids(payload.ids)
+    success_count = 0
+    skipped_not_pending = 0
+    missing_count = 0
+    for sid in ids:
+        record = db.query(StewardshipQueue).filter(StewardshipQueue.id == sid).first()
+        if not record:
+            missing_count += 1
+            continue
+        if record.status != "pending":
+            skipped_not_pending += 1
+            continue
+        record.status = "rejected"
+        success_count += 1
+    summary = f"bulk_reject success={success_count} skipped={skipped_not_pending} missing={missing_count} id_sample={ids[:20]}"
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="stewardship_bulk_reject",
+        entity="stewardship_queue",
+        old_value=f"n_ids={len(ids)}",
+        new_value=summary[:2000],
+    )
+    db.commit()
+    return {
+        "success_count": success_count,
+        "skipped_not_pending": skipped_not_pending,
+        "missing_count": missing_count,
+    }
 
 
 @app.get("/quarantine/paged", response_model=QuarantinePageOut)
