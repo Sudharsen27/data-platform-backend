@@ -28,6 +28,12 @@ class QuarantinePageOut(BaseModel):
     limit: int
 
 
+class QuarantineBulkImport(BaseModel):
+    """Import sample or production-like bad rows into quarantine (portfolio / demos)."""
+
+    rows: list[QuarantineBase]
+
+
 class RuleBase(BaseModel):
     field: str
     rule: str

@@ -28,6 +28,7 @@ from app.models import (
 from app.schemas import (
     DashboardOverviewOut,
     PipelineRunOut,
+    QuarantineBulkImport,
     QuarantinePageOut,
     QuarantineOut,
     QuarantineUpdate,
@@ -63,7 +64,11 @@ from app.services.audit_log import write_audit_log
 from app.utils.jwt import verify_token
 from app.utils.security import hash_password
 
-app = FastAPI()
+app = FastAPI(
+    title="MDM Data Governance Platform API",
+    description="mini-mdm-platform backend — verify this title in /docs or /openapi.json when debugging port 8000.",
+    version="0.1.0",
+)
 app.include_router(auth_router)
 app.include_router(audit_router)
 app.include_router(users_router)
@@ -132,6 +137,8 @@ def seed_data(db: Session):
 
     # Optional bootstrap user creation for empty prod DBs.
     # Set ADMIN_BOOTSTRAP_PASSWORD to enable automatic admin account creation.
+    # If the admin email already exists (e.g. registered earlier), creation is skipped
+    # and the stored password is unchanged unless ADMIN_BOOTSTRAP_SYNC_PASSWORD is set.
     bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD", "").strip()
     for admin_email in admin_emails:
         existing_admin_user = (
@@ -153,6 +160,19 @@ def seed_data(db: Session):
             )
         )
     db.commit()
+
+    sync_bootstrap = os.getenv("ADMIN_BOOTSTRAP_SYNC_PASSWORD", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if sync_bootstrap and bootstrap_password and admin_emails:
+        for admin_email in admin_emails:
+            user = db.query(User).filter(User.email.ilike(admin_email)).first()
+            if user:
+                user.password_hash = hash_password(bootstrap_password)
+                db.add(user)
+        db.commit()
 
     for admin_email in admin_emails:
         db.execute(
@@ -390,6 +410,8 @@ def seed_data(db: Session):
 
 @app.on_event("startup")
 def on_startup():
+    if os.getenv("SKIP_STARTUP_SEED", "").strip().lower() in ("1", "true", "yes"):
+        return
     db = SessionLocal()
     try:
         seed_data(db)
@@ -847,6 +869,47 @@ def get_quarantine_paged(
         "offset": offset,
         "limit": limit,
     }
+
+
+_MAX_QUARANTINE_IMPORT_ROWS = 500
+
+
+@app.post("/quarantine/import")
+def import_quarantine_rows(
+    payload: QuarantineBulkImport,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Bulk-load quarantine rows (e.g. from CSV processing or demos). Audited."""
+    n = len(payload.rows)
+    if n == 0:
+        raise HTTPException(status_code=400, detail="No rows provided")
+    if n > _MAX_QUARANTINE_IMPORT_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many rows; maximum is {_MAX_QUARANTINE_IMPORT_ROWS}",
+        )
+
+    for row in payload.rows:
+        db.add(
+            QuarantineData(
+                name=row.name.strip(),
+                email=(row.email or "").strip(),
+                error=(row.error or "").strip(),
+                match_status="new",
+            )
+        )
+
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="quarantine_bulk_import",
+        entity="quarantine_data",
+        old_value="",
+        new_value=f"imported_count={n}",
+    )
+    db.commit()
+    return {"message": f"Imported {n} row(s)", "count": n}
 
 
 @app.post("/quarantine/update")

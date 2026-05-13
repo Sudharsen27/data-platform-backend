@@ -9,3 +9,5 @@ snowflake-connector-python
 apscheduler
 python-dotenv
 alembic
+httpx>=0.27.0
+pytest>=8.0.0

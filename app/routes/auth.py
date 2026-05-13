@@ -3,7 +3,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -22,7 +22,9 @@ def _admin_email_set() -> set[str]:
 
 
 class LoginRequest(BaseModel):
-    email: str
+    """Accept `email` (current UI) or legacy `login` in JSON for the same value."""
+
+    email: str = Field(validation_alias=AliasChoices("email", "login"))
     password: str
 
 
