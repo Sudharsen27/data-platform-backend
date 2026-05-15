@@ -1,10 +1,13 @@
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
 from app.utils.jwt import verify_token
+
+bearer_scheme = HTTPBearer()
 
 ROLE_PERMISSIONS = {
     "admin": {
@@ -30,19 +33,10 @@ ROLE_PERMISSIONS = {
 }
 
 
-def get_bearer_token(authorization: str | None = Header(default=None)) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
-    token = authorization.replace("Bearer ", "", 1).strip()
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
-    return token
+def get_bearer_token(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> str:
+    return credentials.credentials
 
 
 def get_token_payload(token: str = Depends(get_bearer_token)) -> dict:

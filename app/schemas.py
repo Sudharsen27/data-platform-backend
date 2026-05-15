@@ -179,8 +179,94 @@ class AICopilotActionResponse(BaseModel):
     details: list[str] = []
 
 
+class DashboardKpiOut(BaseModel):
+    key: str
+    title: str
+    value: str
+    delta: str
+    delta_positive: bool | None = None
+    delta_label: str = "vs last 7 days"
+    href: str = ""
+
+
+class DashboardAlertOut(BaseModel):
+    name: str
+    detail: str = ""
+    severity: str
+    href: str = ""
+
+
+class ComplianceCheckOut(BaseModel):
+    key: str
+    label: str
+    status: str
+    status_label: str
+    detail: str = ""
+    href: str = ""
+
+
+class ComplianceStatusOut(BaseModel):
+    overall_percent: int
+    checks: list[ComplianceCheckOut]
+
+
+class DashboardTrendPointOut(BaseModel):
+    day: str
+    date: str
+    processed: int = 0
+    successful_jobs: int = 0
+    failed_jobs: int = 0
+
+
+class ErrorDistributionPointOut(BaseModel):
+    type: str
+    count: int
+
+
+class DashboardTrendsOut(BaseModel):
+    records_trend: list[DashboardTrendPointOut]
+    error_distribution: list[ErrorDistributionPointOut]
+
+
+class AuditActivityOut(BaseModel):
+    id: int
+    user_id: str
+    action: str
+    entity: str
+    summary: str
+    timestamp: datetime
+    href: str = ""
+    category: str = "governance"
+
+    class Config:
+        from_attributes = True
+
+
+class SlaWidgetOut(BaseModel):
+    key: str
+    label: str
+    status: str
+    status_label: str
+    metric: str
+    detail: str = ""
+    href: str = ""
+    sla_target: str = ""
+
+
+class SlaStatusOut(BaseModel):
+    overall_status: str
+    overall_label: str
+    widgets: list[SlaWidgetOut]
+
+
 class DashboardOverviewOut(BaseModel):
-    kpis: dict
+    kpi_summary: dict
+    kpi_cards: list[DashboardKpiOut]
+    alerts: list[DashboardAlertOut]
+    compliance: ComplianceStatusOut
+    trends: DashboardTrendsOut
+    audit_activity: list[AuditActivityOut]
+    sla: SlaStatusOut
     last_sync_job: dict | None = None
     pipeline_status: dict
     recent_jobs: list[SyncJobOut]

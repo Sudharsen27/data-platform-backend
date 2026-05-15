@@ -44,6 +44,16 @@ from app.schemas import (
     SyncJobOut,
 )
 from app.services.ai_insights import build_ai_insights
+from app.services.dashboard_metrics import (
+    build_audit_activity_feed,
+    build_compliance_status,
+    build_dashboard_alerts,
+    build_dashboard_trends,
+    build_kpi_cards,
+    build_kpi_summary,
+    build_sla_status,
+    resolve_quarantine_analytics,
+)
 from app.services.snowflake_analytics import get_quarantine_analytics
 from app.db.snowflake import get_snowflake_connection
 from app.services.pipeline import get_pipeline_state, run_pipeline
@@ -529,7 +539,8 @@ def dashboard_overview(
 ):
     latest_job = db.query(SyncJob).order_by(SyncJob.id.desc()).first()
     scheduler_state = get_scheduler_state()
-    analytics = get_quarantine_analytics()
+    scheduler_enabled = bool(scheduler_state.get("enabled"))
+    analytics = resolve_quarantine_analytics(db)
     lineage_nodes = db.query(LineageNode).order_by(LineageNode.id.asc()).all()
     lineage_edges = db.query(LineageEdge).order_by(LineageEdge.id.asc()).all()
     stewardship_items = (
@@ -539,11 +550,13 @@ def dashboard_overview(
     pipeline_status = get_pipeline_state()
 
     return {
-        "kpis": {
-            "success_rate": analytics.get("success_rate", 0),
-            "failed_records": analytics.get("failed_records", 0),
-            "active_jobs": 1 if scheduler_state.get("enabled") else 0,
-        },
+        "kpi_summary": build_kpi_summary(analytics, scheduler_enabled),
+        "kpi_cards": build_kpi_cards(db, analytics, scheduler_enabled),
+        "alerts": build_dashboard_alerts(db, analytics),
+        "compliance": build_compliance_status(db, analytics),
+        "trends": build_dashboard_trends(db, analytics),
+        "audit_activity": build_audit_activity_feed(db),
+        "sla": build_sla_status(db, analytics, pipeline_status, scheduler_enabled),
         "last_sync_job": {
             "status": latest_job.status,
             "start_time": latest_job.start_time,
