@@ -573,7 +573,7 @@ def dashboard_overview(
             "edges": lineage_edges,
         },
         "stewardship": stewardship_items,
-        "ai_insights": build_ai_insights(db),
+        "ai_insights": build_ai_insights(db, analytics),
     }
 
 

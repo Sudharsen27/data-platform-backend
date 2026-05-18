@@ -1,11 +1,19 @@
-from app.models import QuarantineData, StewardshipQueue, SyncJob
+from app.models import StewardshipQueue, SyncJob
 
 
-def build_ai_insights(db):
-    quarantine_total = db.query(QuarantineData).count()
-    quarantine_with_error = (
-        db.query(QuarantineData).filter(QuarantineData.error.isnot(None), QuarantineData.error != "").count()
-    )
+def build_ai_insights(db, analytics: dict | None = None):
+    if analytics:
+        quarantine_total = int(analytics.get("total_records") or 0)
+        quarantine_with_error = int(analytics.get("failed_records") or 0)
+    else:
+        from app.models import QuarantineData
+
+        quarantine_total = db.query(QuarantineData).count()
+        quarantine_with_error = (
+            db.query(QuarantineData)
+            .filter(QuarantineData.error.isnot(None), QuarantineData.error != "")
+            .count()
+        )
     failed_jobs = db.query(SyncJob).filter(SyncJob.status == "failed").count()
     pending_stewardship = db.query(StewardshipQueue).filter(StewardshipQueue.status == "pending").count()
 

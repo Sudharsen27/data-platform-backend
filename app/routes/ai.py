@@ -10,11 +10,47 @@ from app.schemas import (
     AICopilotActionResponse,
     AICopilotInsightOut,
     AICopilotInsightsResponse,
+    AIStatusOut,
+    ExplainQuarantineIn,
+    ExplainQuarantineOut,
 )
+from app.services.ai_copilot import explain_quarantine, get_ai_status
 from app.services.ai_insights import build_ai_insights
 from app.services.audit_log import write_audit_log
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+
+@router.get("/status", response_model=AIStatusOut)
+def read_ai_status(_: User = Depends(get_current_user)):
+    return AIStatusOut(**get_ai_status())
+
+
+@router.post("/actions/explain-quarantine", response_model=ExplainQuarantineOut)
+def explain_quarantine_error(
+    body: ExplainQuarantineIn,
+    db: Session = Depends(get_db),
+    actor: User = Depends(get_current_user),
+):
+    result = explain_quarantine(name=body.name, email=body.email, error=body.error)
+    _save_action_log(
+        db,
+        action_key="explain_quarantine",
+        user_id=actor.email,
+        status="success",
+        summary="Quarantine error explained",
+        payload={"source": result["source"], "error_preview": (body.error or "")[:120]},
+    )
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="ai_explain_quarantine",
+        entity="quarantine",
+        old_value=body.error or "",
+        new_value=result["explanation"][:500],
+    )
+    db.commit()
+    return ExplainQuarantineOut(**result)
 
 
 def _save_action_log(
@@ -42,7 +78,14 @@ def get_ai_insights(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    return {"items": [AICopilotInsightOut(**item) for item in build_ai_insights(db)]}
+    from app.services.dashboard_metrics import get_quarantine_analytics_from_db
+
+    analytics = get_quarantine_analytics_from_db(db)
+    return {
+        "items": [
+            AICopilotInsightOut(**item) for item in build_ai_insights(db, analytics)
+        ]
+    }
 
 
 @router.post("/actions/generate-rules", response_model=AICopilotActionResponse)
@@ -188,7 +231,13 @@ def summarize_failed_jobs(
         low = raw.lower()
         if "timeout" in low:
             category = "timeout"
-        elif "snowflake" in low:
+        elif (
+            "snowflake" in low
+            or "sql compilation" in low
+            or "42601" in raw
+            or "001795" in raw
+            or "expressions in a list" in low
+        ):
             category = "snowflake"
         elif "network" in low:
             category = "network"

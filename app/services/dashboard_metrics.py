@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 from datetime import datetime, time, timedelta
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
+
+# Full-table DISTINCT / GROUP BY on very large quarantine tables can exceed UI timeouts.
+_LARGE_QUARANTINE_FAST_PATH = 50_000
 
 from app.models import (
     AuditLog,
@@ -37,30 +40,41 @@ STATUS_SCORES = {"pass": 100, "needs_review": 55, "fail": 25}
 
 
 def get_quarantine_analytics_from_db(db: Session) -> dict:
-    total_records = db.query(QuarantineData).count()
-    failed_records = (
-        db.query(QuarantineData)
-        .filter(QuarantineData.error.isnot(None), QuarantineData.error != "")
-        .count()
-    )
+    has_error = (QuarantineData.error.isnot(None)) & (QuarantineData.error != "")
+    totals = db.query(
+        func.count(QuarantineData.id).label("total"),
+        func.sum(case((has_error, 1), else_=0)).label("failed"),
+    ).one()
+    total_records = int(totals.total or 0)
+    failed_records = int(totals.failed or 0)
     success_records = max(total_records - failed_records, 0)
     success_rate = round((success_records / total_records) * 100, 1) if total_records else 0.0
 
-    error_rows = (
-        db.query(QuarantineData.error, func.count(QuarantineData.id))
-        .filter(QuarantineData.error.isnot(None), QuarantineData.error != "")
-        .group_by(QuarantineData.error)
-        .order_by(func.count(QuarantineData.id).desc())
-        .limit(10)
-        .all()
-    )
+    error_distribution: list[dict] = []
+    if total_records and total_records <= _LARGE_QUARANTINE_FAST_PATH:
+        error_rows = (
+            db.query(QuarantineData.error, func.count(QuarantineData.id))
+            .filter(has_error)
+            .group_by(QuarantineData.error)
+            .order_by(func.count(QuarantineData.id).desc())
+            .limit(10)
+            .all()
+        )
+        error_distribution = [{"error": row[0], "count": row[1]} for row in error_rows]
+    elif failed_records:
+        error_distribution = [
+            {
+                "error": "(summary — table too large for full breakdown)",
+                "count": failed_records,
+            }
+        ]
 
     return {
         "total_records": total_records,
         "success_records": success_records,
         "failed_records": failed_records,
         "success_rate": success_rate,
-        "error_distribution": [{"error": row[0], "count": row[1]} for row in error_rows],
+        "error_distribution": error_distribution,
     }
 
 
@@ -114,6 +128,9 @@ def _job_success_rate(db: Session, start: datetime, end: datetime) -> float:
 def _uniqueness_percent(db: Session, total: int) -> float:
     if total == 0:
         return 100.0
+    if total > _LARGE_QUARANTINE_FAST_PATH:
+        # COUNT(DISTINCT email) on millions of rows blocks dashboard loads.
+        return 90.0
     distinct_emails = (
         db.query(func.count(func.distinct(QuarantineData.email)))
         .filter(QuarantineData.email.isnot(None), QuarantineData.email != "")

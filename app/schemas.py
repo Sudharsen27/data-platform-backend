@@ -179,6 +179,25 @@ class AICopilotActionResponse(BaseModel):
     details: list[str] = []
 
 
+class AIStatusOut(BaseModel):
+    enabled: bool
+    provider: str
+    model: str = ""
+    available: bool
+    mode: str = "heuristics"
+
+
+class ExplainQuarantineIn(BaseModel):
+    name: str = ""
+    email: str = ""
+    error: str = ""
+
+
+class ExplainQuarantineOut(BaseModel):
+    explanation: str
+    source: str
+
+
 class DashboardKpiOut(BaseModel):
     key: str
     title: str
