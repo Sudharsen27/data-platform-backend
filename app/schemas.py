@@ -57,6 +57,24 @@ class RuleOut(RuleBase):
         from_attributes = True
 
 
+class RuleValidateIn(BaseModel):
+    name: str = ""
+    email: str = ""
+
+
+class RuleViolationOut(BaseModel):
+    field: str
+    message: str
+    rule_id: int | None = None
+    rule_text: str = ""
+
+
+class RuleValidateOut(BaseModel):
+    violations: list[RuleViolationOut]
+    error: str
+    active_rules: int
+
+
 class SyncJobOut(BaseModel):
     id: int
     status: str
@@ -106,6 +124,7 @@ class StewardshipOut(BaseModel):
     email: str
     issue: str
     status: str
+    owner_email: str = ""
 
     class Config:
         from_attributes = True
@@ -133,6 +152,32 @@ class StewardshipBulkOutcome(BaseModel):
     success_count: int
     skipped_not_pending: int
     missing_count: int
+
+
+class MasterDataOut(BaseModel):
+    id: int
+    source_queue_id: int
+    name: str
+    email: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MasterDataPageOut(BaseModel):
+    items: list[MasterDataOut]
+    total: int
+    offset: int
+    limit: int
+
+
+class MasterDataCompareOut(BaseModel):
+    source_queue_id: int
+    stewardship: StewardshipOut
+    quarantine: QuarantineOut | None = None
+    golden: MasterDataOut | None = None
+    is_published: bool
 
 
 class LineageNodeOut(BaseModel):
@@ -196,6 +241,33 @@ class ExplainQuarantineIn(BaseModel):
 class ExplainQuarantineOut(BaseModel):
     explanation: str
     source: str
+
+
+class AISuggestStewardshipIn(BaseModel):
+    """Assign stewards to selected pending tasks, or all pending when assign_all_pending is true."""
+
+    ids: list[int] = []
+    assign_all_pending: bool = False
+
+
+class AICopilotActionLogOut(BaseModel):
+    id: int
+    action_key: str
+    user_id: str
+    status: str
+    summary: str
+    payload: dict = {}
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AICopilotActionLogsPageOut(BaseModel):
+    items: list[AICopilotActionLogOut]
+    total: int
+    offset: int
+    limit: int
 
 
 class DashboardKpiOut(BaseModel):
@@ -304,6 +376,9 @@ class CatalogAssetBase(BaseModel):
     tags: str = ""
     pii_tier: str = "internal"
     lineage_node_key: str = ""
+    schema_fields: str = ""
+    sla_hours: int = 24
+    contract_version: str = "1.0"
 
 
 class CatalogAssetCreate(CatalogAssetBase):
@@ -316,3 +391,13 @@ class CatalogAssetOut(CatalogAssetBase):
 
     class Config:
         from_attributes = True
+
+
+class LineageImpactOut(BaseModel):
+    anchor_node_key: str | None = None
+    field: str | None = None
+    affected_node_keys: list[str]
+    nodes: list[LineageNodeOut]
+    edges: list[LineageEdgeOut]
+    catalog_assets: list[CatalogAssetOut]
+    summary: str

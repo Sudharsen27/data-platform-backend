@@ -1,24 +1,97 @@
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps.auth import get_current_user, require_permission
 from app.models import AICopilotActionLog, QuarantineData, Rule, StewardshipQueue, SyncJob, User
 from app.schemas import (
+    AICopilotActionLogOut,
+    AICopilotActionLogsPageOut,
     AICopilotActionResponse,
     AICopilotInsightOut,
     AICopilotInsightsResponse,
     AIStatusOut,
+    AISuggestStewardshipIn,
     ExplainQuarantineIn,
     ExplainQuarantineOut,
 )
 from app.services.ai_copilot import explain_quarantine, get_ai_status
 from app.services.ai_insights import build_ai_insights
+from app.services.ai_rule_suggestions import build_rule_suggestions_from_quarantine
+from app.services.ai_stewardship_assignments import assign_stewardship_owners
 from app.services.audit_log import write_audit_log
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+_KNOWN_ACTION_KEYS = frozenset(
+    {
+        "generate_rules",
+        "suggest_stewardship_owners",
+        "explain_quarantine",
+        "summarize_failed_jobs",
+    }
+)
+
+
+def _parse_action_payload(raw: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _serialize_action_log(row: AICopilotActionLog) -> AICopilotActionLogOut:
+    return AICopilotActionLogOut(
+        id=row.id,
+        action_key=row.action_key,
+        user_id=row.user_id,
+        status=row.status,
+        summary=row.summary,
+        payload=_parse_action_payload(row.payload),
+        created_at=row.created_at,
+    )
+
+
+@router.get("/actions/logs", response_model=AICopilotActionLogsPageOut)
+def list_ai_action_logs(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    action_key: str = Query("", description="Filter by action_key"),
+    user_id: str = Query("", description="Filter by user email (partial match)"),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("audit:read")),
+):
+    q = db.query(AICopilotActionLog)
+    key = action_key.strip()
+    if key:
+        if key not in _KNOWN_ACTION_KEYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"action_key must be one of: {', '.join(sorted(_KNOWN_ACTION_KEYS))}",
+            )
+        q = q.filter(AICopilotActionLog.action_key == key)
+    user_filter = user_id.strip()
+    if user_filter:
+        q = q.filter(AICopilotActionLog.user_id.ilike(f"%{user_filter}%"))
+
+    total = q.count()
+    rows = (
+        q.order_by(AICopilotActionLog.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [_serialize_action_log(row) for row in rows],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.get("/status", response_model=AIStatusOut)
@@ -93,15 +166,16 @@ def generate_rules_from_profile(
     db: Session = Depends(get_db),
     actor: User = Depends(require_permission("rules:write")),
 ):
-    suggestions = [
-        ("email", "Email must contain @ and a valid domain suffix", 0.95),
-        ("name", "Name should have at least 2 alphabetic characters", 0.88),
-        ("email", "Email should be unique across source systems", 0.91),
-    ]
+    suggestions = build_rule_suggestions_from_quarantine(db)
     created_ids: list[str] = []
     details: list[str] = []
 
-    for field_name, rule_text, confidence in suggestions:
+    for item in suggestions:
+        field_name = item["field"]
+        rule_text = item["rule"]
+        confidence = float(item["confidence"])
+        count = int(item.get("occurrence_count") or 0)
+        source = (item.get("source_error") or "profile").strip()
         exists = (
             db.query(Rule)
             .filter(
@@ -111,33 +185,53 @@ def generate_rules_from_profile(
             .first()
         )
         if exists:
-            details.append(f"{field_name}: already exists (confidence {confidence:.2f})")
+            if count > 0:
+                details.append(
+                    f"{field_name}: already exists (confidence {confidence:.2f}, "
+                    f"pattern {count}× \"{source[:60]}\")"
+                )
+            else:
+                details.append(f"{field_name}: already exists (confidence {confidence:.2f})")
             continue
-        item = Rule(
+        rule_row = Rule(
             field=field_name,
             rule=rule_text,
             status="active",
             created_by="ai-copilot",
         )
-        db.add(item)
+        db.add(rule_row)
         db.flush()
-        created_ids.append(str(item.id))
-        details.append(
-            f"{field_name}: created Rule ID {item.id} (confidence {confidence:.2f})"
-        )
+        created_ids.append(str(rule_row.id))
+        if count > 0:
+            details.append(
+                f"{field_name}: created Rule ID {rule_row.id} (confidence {confidence:.2f}, "
+                f"from {count}× \"{source[:60]}\")"
+            )
+        else:
+            details.append(
+                f"{field_name}: created Rule ID {rule_row.id} (confidence {confidence:.2f})"
+            )
 
-    summary = (
-        f"Generated {len(created_ids)} new quality rule(s)."
-        if created_ids
-        else "No new rules created. Suggested rules already exist."
-    )
+    analyzed = sum(1 for s in suggestions if int(s.get("occurrence_count") or 0) > 0)
+    if created_ids:
+        summary = (
+            f"Generated {len(created_ids)} new quality rule(s) from quarantine patterns."
+            if analyzed
+            else f"Generated {len(created_ids)} new quality rule(s)."
+        )
+    else:
+        summary = "No new rules created. Suggested rules already exist."
     _save_action_log(
         db,
         action_key="generate_rules",
         user_id=actor.email,
         status="success",
         summary=summary,
-        payload={"created_rule_ids": created_ids, "details": details},
+        payload={
+            "created_rule_ids": created_ids,
+            "details": details,
+            "patterns_analyzed": analyzed,
+        },
     )
     write_audit_log(
         db,
@@ -157,43 +251,31 @@ def generate_rules_from_profile(
 
 @router.post("/actions/suggest-stewardship-owners", response_model=AICopilotActionResponse)
 def suggest_stewardship_owners(
+    body: AISuggestStewardshipIn | None = None,
     db: Session = Depends(get_db),
     actor: User = Depends(require_permission("stewardship:manage")),
 ):
-    pending_items = (
-        db.query(StewardshipQueue)
-        .filter(StewardshipQueue.status == "pending")
-        .order_by(StewardshipQueue.id.asc())
-        .limit(10)
-        .all()
+    payload = body or AISuggestStewardshipIn()
+    result = assign_stewardship_owners(
+        db,
+        task_ids=payload.ids if payload.ids else None,
+        assign_all_pending=payload.assign_all_pending,
     )
-    candidate_load = {
-        "Data Steward - Customer Domain": 2,
-        "Data Steward - Product Domain": 1,
-        "Data Governance Admin": 3,
-    }
-    details: list[str] = []
-    for index, item in enumerate(pending_items):
-        sorted_candidates = sorted(candidate_load.items(), key=lambda pair: pair[1])
-        suggested_owner, current_load = sorted_candidates[0]
-        candidate_load[suggested_owner] = current_load + 1
-        confidence = max(0.55, 0.92 - (current_load * 0.08))
-        details.append(
-            f"TASK-{item.id}: {suggested_owner} (confidence {confidence:.2f}, issue: {item.issue or 'general review'})"
-        )
-
-    summary = (
-        f"Prepared owner suggestions for {len(details)} stewardship task(s)."
-        if details
-        else "No pending stewardship tasks found."
-    )
+    if result.get("error") == "no_target":
+        raise HTTPException(status_code=400, detail=result["summary"])
     _save_action_log(
         db,
         action_key="suggest_stewardship_owners",
         user_id=actor.email,
         status="success",
-        summary=summary,
-        payload={"suggestions": details},
+        summary=result["summary"],
+        payload={
+            "assignments": result["assignments"],
+            "applied_count": result["applied_count"],
+            "skipped_count": result["skipped_count"],
+            "ids": payload.ids,
+            "assign_all_pending": payload.assign_all_pending,
+        },
     )
     write_audit_log(
         db,
@@ -201,13 +283,13 @@ def suggest_stewardship_owners(
         action="ai_suggest_stewardship_owners",
         entity="stewardship_queue",
         old_value="",
-        new_value=summary,
+        new_value=result["summary"],
     )
     db.commit()
     return {
         "action": "suggest_stewardship_owners",
-        "summary": summary,
-        "details": details,
+        "summary": result["summary"],
+        "details": result["details"],
     }
 
 

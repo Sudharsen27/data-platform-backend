@@ -5,6 +5,7 @@ import copy
 from sqlalchemy.orm import Session
 
 from app.models import PipelineRun, QuarantineData, Rule, StewardshipQueue
+from app.services.rule_engine import run_rule_execution, validate_row_with_rules
 
 
 def _default_steps():
@@ -49,46 +50,15 @@ _pipeline_state = {
         "stewardship": 0,
         "golden": 0,
     },
+    "rule_execution": {
+        "active_rules": 0,
+        "records_evaluated": 0,
+        "records_with_violations": 0,
+        "total_violations": 0,
+        "rule_hits": [],
+    },
 }
 _state_lock = Lock()
-
-
-def _is_empty(value):
-    return str(value or "").strip() == ""
-
-
-def _apply_rule_to_field(field_value, field_name: str, rule_text: str):
-    normalized_rule = str(rule_text or "").lower()
-
-    if (
-        "cannot be null" in normalized_rule
-        or "cannot be empty" in normalized_rule
-        or "required" in normalized_rule
-    ):
-        if _is_empty(field_value):
-            return f"{field_name} {normalized_rule}"
-
-    if field_name == "email" and "contain @" in normalized_rule:
-        if "@" not in str(field_value or ""):
-            return "email must contain @"
-
-    return ""
-
-
-def _validate_row_with_rules(row: QuarantineData, rules):
-    errors = []
-
-    for rule in rules:
-        field_name = str(rule.field or "").strip().lower()
-        if not field_name:
-            continue
-
-        field_value = getattr(row, field_name, "")
-        message = _apply_rule_to_field(field_value, field_name, rule.rule or "")
-        if message:
-            errors.append(message)
-
-    return ", ".join(errors)
 
 
 def _compute_match_status(name: str, email: str):
@@ -183,6 +153,14 @@ def run_pipeline(db: Session):
         review_count = 0
         new_count = 0
         stewardship_count = 0
+        aggregate_rule_stats = {
+            "active_rules": len(rules),
+            "records_evaluated": 0,
+            "records_with_violations": 0,
+            "total_violations": 0,
+            "rule_hits": {},
+        }
+        email_seen_global: dict[str, int] = {}
 
         for offset in range(0, total_records, batch_size):
             records = (
@@ -192,9 +170,32 @@ def run_pipeline(db: Session):
                 .limit(batch_size)
                 .all()
             )
+            if not records:
+                continue
 
-            for record in records:
-                transformed_error = _validate_row_with_rules(record, rules)
+            batch_ids = [r.id for r in records]
+            existing_stewardship_ids = {
+                row[0]
+                for row in db.query(StewardshipQueue.id)
+                .filter(StewardshipQueue.id.in_(batch_ids))
+                .all()
+            }
+
+            batch_errors, batch_stats = run_rule_execution(
+                records, rules, seen_emails=email_seen_global
+            )
+            aggregate_rule_stats["records_evaluated"] += batch_stats.records_evaluated
+            aggregate_rule_stats["records_with_violations"] += (
+                batch_stats.records_with_violations
+            )
+            aggregate_rule_stats["total_violations"] += batch_stats.total_violations
+            for hit in batch_stats.rule_hits:
+                key = str(hit["rule_id"])
+                aggregate_rule_stats["rule_hits"][key] = (
+                    aggregate_rule_stats["rule_hits"].get(key, 0) + hit["hits"]
+                )
+
+            for record, transformed_error in zip(records, batch_errors):
                 match_status = _compute_match_status(record.name, record.email)
                 match_confidence = _compute_match_confidence(
                     record.name, record.email, transformed_error
@@ -219,12 +220,7 @@ def run_pipeline(db: Session):
                         )
                     else:
                         issue_text = "Review needed for moderate confidence match."
-                    existing_item = (
-                        db.query(StewardshipQueue)
-                        .filter(StewardshipQueue.id == record.id)
-                        .first()
-                    )
-                    if not existing_item:
+                    if record.id not in existing_stewardship_ids:
                         db.add(
                             StewardshipQueue(
                                 id=record.id,
@@ -234,11 +230,18 @@ def run_pipeline(db: Session):
                                 status="pending",
                             )
                         )
+                        existing_stewardship_ids.add(record.id)
                     else:
-                        existing_item.name = record.name
-                        existing_item.email = record.email
-                        existing_item.issue = issue_text
-                        existing_item.status = "pending"
+                        existing_item = (
+                            db.query(StewardshipQueue)
+                            .filter(StewardshipQueue.id == record.id)
+                            .first()
+                        )
+                        if existing_item:
+                            existing_item.name = record.name
+                            existing_item.email = record.email
+                            existing_item.issue = issue_text
+                            existing_item.status = "pending"
                     stewardship_count += 1
                     final_status = "stewardship"
 
@@ -273,6 +276,33 @@ def run_pipeline(db: Session):
                 _set_step_count(_pipeline_state["steps"], "golden", merged_count)
 
         now = datetime.now(timezone.utc).isoformat()
+        rule_hits_list = []
+        if aggregate_rule_stats["rule_hits"]:
+            rule_by_id = {r.id: r for r in rules}
+            for rid, count in sorted(
+                aggregate_rule_stats["rule_hits"].items(),
+                key=lambda pair: pair[1],
+                reverse=True,
+            ):
+                rule_obj = rule_by_id.get(int(rid))
+                if rule_obj:
+                    rule_hits_list.append(
+                        {
+                            "rule_id": rule_obj.id,
+                            "field": rule_obj.field,
+                            "rule": rule_obj.rule,
+                            "hits": count,
+                        }
+                    )
+
+        rule_execution = {
+            "active_rules": aggregate_rule_stats["active_rules"],
+            "records_evaluated": aggregate_rule_stats["records_evaluated"],
+            "records_with_violations": aggregate_rule_stats["records_with_violations"],
+            "total_violations": aggregate_rule_stats["total_violations"],
+            "rule_hits": rule_hits_list,
+        }
+
         summary = {
             "total_records": total_records,
             "merged": merged_count,
@@ -282,6 +312,7 @@ def run_pipeline(db: Session):
             "status": "success",
             "message": "Pipeline completed successfully.",
             "ran_at": now,
+            "rule_execution": rule_execution,
         }
 
         with _state_lock:
@@ -296,6 +327,7 @@ def run_pipeline(db: Session):
             _set_step_status(_pipeline_state["steps"], "matching", "completed")
             _set_step_status(_pipeline_state["steps"], "stewardship", "completed")
             _set_step_status(_pipeline_state["steps"], "golden", "completed")
+            _pipeline_state["rule_execution"] = rule_execution
 
             summary["run_count"] = _pipeline_state["run_count"]
             summary["success_count"] = _pipeline_state["success_count"]

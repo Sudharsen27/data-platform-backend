@@ -69,6 +69,9 @@ from app.routes.users import router as users_router
 from app.routes.lineage import router as lineage_router
 from app.routes.ai import router as ai_router
 from app.routes.catalog import router as catalog_router
+from app.routes.master_data import router as master_data_router
+from app.routes.rules_engine import router as rules_engine_router
+from app.services.master_data_publish import publish_stewardship_to_master
 from app.deps.auth import get_current_user, require_admin, require_permission
 from app.services.audit_log import write_audit_log
 from app.utils.jwt import verify_token
@@ -85,6 +88,8 @@ app.include_router(users_router)
 app.include_router(lineage_router)
 app.include_router(ai_router)
 app.include_router(catalog_router)
+app.include_router(master_data_router)
+app.include_router(rules_engine_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [
@@ -241,7 +246,12 @@ def seed_data(db: Session):
     )
     db.execute(
         text(
-            "CREATE TABLE IF NOT EXISTS stewardship_queue (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, email VARCHAR DEFAULT '', issue VARCHAR DEFAULT '', status VARCHAR DEFAULT 'pending')"
+            "CREATE TABLE IF NOT EXISTS stewardship_queue (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, email VARCHAR DEFAULT '', issue VARCHAR DEFAULT '', status VARCHAR DEFAULT 'pending', owner_email VARCHAR DEFAULT '')"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE stewardship_queue ADD COLUMN IF NOT EXISTS owner_email VARCHAR DEFAULT ''"
         )
     )
     db.execute(
@@ -350,6 +360,21 @@ def seed_data(db: Session):
             "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS lineage_node_key VARCHAR NOT NULL DEFAULT ''"
         )
     )
+    db.execute(
+        text(
+            "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS schema_fields VARCHAR NOT NULL DEFAULT ''"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS sla_hours INTEGER NOT NULL DEFAULT 24"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS contract_version VARCHAR NOT NULL DEFAULT '1.0'"
+        )
+    )
     db.commit()
     db.execute(
         text(
@@ -378,6 +403,9 @@ def seed_data(db: Session):
                     tags="crm,source,pii",
                     pii_tier="confidential",
                     lineage_node_key="crm.customers_raw",
+                    schema_fields="customer_id,name,email,phone,created_at",
+                    sla_hours=4,
+                    contract_version="1.2",
                 ),
                 CatalogAsset(
                     asset_key="staging.customers_clean",
@@ -389,6 +417,9 @@ def seed_data(db: Session):
                     tags="staging,mdm",
                     pii_tier="confidential",
                     lineage_node_key="staging.customers_clean",
+                    schema_fields="customer_id,name,email,phone,match_status",
+                    sla_hours=8,
+                    contract_version="1.1",
                 ),
                 CatalogAsset(
                     asset_key="mdm.customer_master",
@@ -400,6 +431,9 @@ def seed_data(db: Session):
                     tags="golden,mdm,authoritative",
                     pii_tier="restricted",
                     lineage_node_key="mdm.customer_master",
+                    schema_fields="golden_id,name,email,source_system,last_updated",
+                    sla_hours=24,
+                    contract_version="2.0",
                 ),
                 CatalogAsset(
                     asset_key="bi.customer_360",
@@ -411,6 +445,9 @@ def seed_data(db: Session):
                     tags="bi,consumption",
                     pii_tier="confidential",
                     lineage_node_key="bi.customer_360",
+                    schema_fields="customer_key,lifetime_value,segment,email_domain",
+                    sla_hours=48,
+                    contract_version="1.0",
                 ),
             ]
         )
@@ -418,8 +455,66 @@ def seed_data(db: Session):
     db.commit()
 
 
+def _ensure_runtime_schema(db: Session) -> None:
+    """DDL that must run even when SKIP_STARTUP_SEED is set (e.g. new columns on existing DBs)."""
+    bind = db.get_bind()
+    if bind.dialect.name == "sqlite":
+        columns = db.execute(text("PRAGMA table_info(stewardship_queue)")).fetchall()
+        names = {row[1] for row in columns}
+        if "owner_email" not in names:
+            db.execute(
+                text(
+                    "ALTER TABLE stewardship_queue ADD COLUMN owner_email VARCHAR DEFAULT ''"
+                )
+            )
+        cat_cols = db.execute(text("PRAGMA table_info(catalog_assets)")).fetchall()
+        cat_names = {row[1] for row in cat_cols}
+        if "schema_fields" not in cat_names:
+            db.execute(
+                text("ALTER TABLE catalog_assets ADD COLUMN schema_fields VARCHAR DEFAULT ''")
+            )
+        if "sla_hours" not in cat_names:
+            db.execute(
+                text("ALTER TABLE catalog_assets ADD COLUMN sla_hours INTEGER DEFAULT 24")
+            )
+        if "contract_version" not in cat_names:
+            db.execute(
+                text(
+                    "ALTER TABLE catalog_assets ADD COLUMN contract_version VARCHAR DEFAULT '1.0'"
+                )
+            )
+    else:
+        db.execute(
+            text(
+                "ALTER TABLE stewardship_queue ADD COLUMN IF NOT EXISTS owner_email VARCHAR DEFAULT ''"
+            )
+        )
+        db.execute(
+            text(
+                "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS schema_fields VARCHAR NOT NULL DEFAULT ''"
+            )
+        )
+        db.execute(
+            text(
+                "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS sla_hours INTEGER NOT NULL DEFAULT 24"
+            )
+        )
+        db.execute(
+            text(
+                "ALTER TABLE catalog_assets ADD COLUMN IF NOT EXISTS contract_version VARCHAR NOT NULL DEFAULT '1.0'"
+            )
+        )
+    db.commit()
+
+
 @app.on_event("startup")
 def on_startup():
+    db = SessionLocal()
+    try:
+        _ensure_runtime_schema(db)
+    finally:
+        db.close()
+
     if os.getenv("SKIP_STARTUP_SEED", "").strip().lower() in ("1", "true", "yes"):
         return
     db = SessionLocal()
@@ -455,12 +550,9 @@ def health_check(db: Session = Depends(get_db)):
     except Exception:
         database_status = "failed"
 
-    snowflake_required = [
-        os.getenv("SNOWFLAKE_ACCOUNT", "").strip(),
-        os.getenv("SNOWFLAKE_USER", "").strip(),
-        os.getenv("SNOWFLAKE_PASSWORD", "").strip(),
-    ]
-    if all(snowflake_required):
+    from app.db.snowflake import is_snowflake_enabled
+
+    if is_snowflake_enabled():
         try:
             sf_start = perf_counter()
             connection = get_snowflake_connection()
@@ -697,9 +789,11 @@ def export_stewardship_csv(
     )
     buffer = StringIO()
     csv_writer = writer(buffer)
-    csv_writer.writerow(["id", "name", "email", "issue", "status"])
+    csv_writer.writerow(["id", "name", "email", "issue", "status", "owner_email"])
     for row in rows:
-        csv_writer.writerow([row.id, row.name, row.email, row.issue, row.status])
+        csv_writer.writerow(
+            [row.id, row.name, row.email, row.issue, row.status, row.owner_email or ""]
+        )
     buffer.seek(0)
     write_audit_log(
         db,
@@ -733,14 +827,7 @@ def approve_stewardship_record(
         return {"message": "Record is already approved", "record": record}
 
     prev = record.status
-    db.add(
-        MasterData(
-            source_queue_id=record.id,
-            name=record.name,
-            email=record.email,
-            created_at=datetime.utcnow(),
-        )
-    )
+    master_row, publish_msg, _merged = publish_stewardship_to_master(db, record)
     record.status = "approved"
     write_audit_log(
         db,
@@ -748,11 +835,15 @@ def approve_stewardship_record(
         action="stewardship_approve",
         entity=f"stewardship_queue:{payload.id}",
         old_value=prev,
-        new_value="approved",
+        new_value=f"approved; {publish_msg}",
     )
     db.commit()
     db.refresh(record)
-    return {"message": "Record approved and moved to master data", "record": record}
+    return {
+        "message": publish_msg,
+        "master_id": master_row.id,
+        "record": record,
+    }
 
 
 @app.post("/stewardship/reject")
@@ -798,14 +889,7 @@ def bulk_approve_stewardship(
         if record.status != "pending":
             skipped_not_pending += 1
             continue
-        db.add(
-            MasterData(
-                source_queue_id=record.id,
-                name=record.name,
-                email=record.email,
-                created_at=datetime.utcnow(),
-            )
-        )
+        publish_stewardship_to_master(db, record)
         record.status = "approved"
         success_count += 1
     summary = f"bulk_approve success={success_count} skipped={skipped_not_pending} missing={missing_count} id_sample={ids[:20]}"
@@ -1061,6 +1145,16 @@ def delete_rule(
 
 @app.post("/sync/snowflake")
 def trigger_snowflake_sync(db: Session = Depends(get_db)):
+    from app.db.snowflake import is_snowflake_enabled
+
+    if not is_snowflake_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Snowflake sync is disabled. Set SNOWFLAKE_ENABLED=true with valid credentials, "
+                "or use Postgres-only mode (SNOWFLAKE_ENABLED=false) after your trial ends."
+            ),
+        )
     try:
         return run_sync_job(db, triggered_by="manual")
     except Exception as error:

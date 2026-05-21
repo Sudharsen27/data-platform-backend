@@ -79,10 +79,9 @@ def get_quarantine_analytics_from_db(db: Session) -> dict:
 
 
 def _snowflake_analytics_configured() -> bool:
-    return all(
-        os.getenv(key, "").strip()
-        for key in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD")
-    )
+    from app.db.snowflake import is_snowflake_enabled
+
+    return is_snowflake_enabled()
 
 
 def resolve_quarantine_analytics(db: Session) -> dict:

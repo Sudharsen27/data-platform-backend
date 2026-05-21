@@ -70,6 +70,7 @@ class StewardshipQueue(Base):
     email = Column(String, nullable=False, default="")
     issue = Column(String, nullable=False, default="")
     status = Column(String, nullable=False, default="pending", index=True)
+    owner_email = Column(String, nullable=False, default="")
 
 
 class MasterData(Base):
@@ -130,6 +131,9 @@ class CatalogAsset(Base):
     tags = Column(String, nullable=False, default="")
     pii_tier = Column(String, nullable=False, default="internal")
     lineage_node_key = Column(String, nullable=False, default="", index=True)
+    schema_fields = Column(String, nullable=False, default="")
+    sla_hours = Column(Integer, nullable=False, default=24)
+    contract_version = Column(String, nullable=False, default="1.0")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
