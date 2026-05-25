@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class QuarantineBase(BaseModel):
@@ -92,6 +92,43 @@ class SyncJobOut(BaseModel):
 class SchedulerToggleRequest(BaseModel):
     enabled: bool
     interval_minutes: int = 10
+
+
+class SchedulerJobConfigRequest(BaseModel):
+    job_type: str
+    enabled: bool
+    trigger_type: str = "interval"
+    interval_minutes: int | None = 10
+    cron_expression: str | None = None
+
+    @model_validator(mode="after")
+    def validate_trigger_fields(self):
+        if self.job_type not in ("snowflake_sync", "pipeline"):
+            raise ValueError("job_type must be snowflake_sync or pipeline")
+        if self.trigger_type not in ("interval", "cron"):
+            raise ValueError("trigger_type must be interval or cron")
+        if not self.enabled:
+            return self
+        if self.trigger_type == "cron" and not (self.cron_expression or "").strip():
+            raise ValueError("cron_expression is required when trigger_type is cron")
+        if self.trigger_type == "interval":
+            if self.interval_minutes is None or self.interval_minutes < 1:
+                raise ValueError("interval_minutes must be at least 1")
+        return self
+
+
+class SchedulerJobStateOut(BaseModel):
+    job_type: str
+    label: str
+    enabled: bool
+    trigger_type: str | None = None
+    interval_minutes: int | None = None
+    cron_expression: str | None = None
+    next_run_at: str | None = None
+
+
+class SchedulerOverviewOut(BaseModel):
+    jobs: list[SchedulerJobStateOut]
 
 
 class AuditLogOut(BaseModel):

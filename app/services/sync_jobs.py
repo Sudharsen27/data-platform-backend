@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from app.models import SyncJob
 from app.services.snowflake_sync import sync_postgres_to_snowflake
@@ -32,11 +32,3 @@ def run_sync_job(db: Session, triggered_by: str = "manual"):
         db.commit()
         db.refresh(sync_job)
         raise
-
-
-def run_scheduled_sync_job(session_factory: sessionmaker):
-    db = session_factory()
-    try:
-        run_sync_job(db, triggered_by="scheduler")
-    finally:
-        db.close()

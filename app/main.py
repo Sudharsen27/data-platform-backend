@@ -35,6 +35,8 @@ from app.schemas import (
     RuleCreate,
     RuleOut,
     RuleUpdate,
+    SchedulerJobConfigRequest,
+    SchedulerOverviewOut,
     SchedulerToggleRequest,
     StewardshipActionRequest,
     StewardshipBulkActionRequest,
@@ -57,11 +59,20 @@ from app.services.dashboard_metrics import (
 from app.services.snowflake_analytics import get_quarantine_analytics
 from app.db.snowflake import get_snowflake_connection
 from app.services.pipeline import get_pipeline_state, run_pipeline
-from app.services.sync_jobs import run_scheduled_sync_job, run_sync_job
-from app.services.sync_scheduler import (
+from app.services.sync_jobs import run_sync_job
+from app.services.job_scheduler import (
+    any_scheduler_enabled,
+    configure_job,
     configure_sync_schedule,
+    count_active_jobs,
+    disable_job,
     disable_sync_schedule,
+    get_all_job_states,
     get_scheduler_state,
+)
+from app.services.scheduled_jobs import (
+    run_scheduled_pipeline_job,
+    run_scheduled_sync_job,
 )
 from app.routes.auth import router as auth_router
 from app.routes.audit import router as audit_router
@@ -530,6 +541,26 @@ def on_startup():
             interval_minutes=scheduler_interval,
         )
 
+    pipeline_cron = os.getenv("PIPELINE_SCHEDULER_CRON", "").strip()
+    if os.getenv("PIPELINE_SCHEDULER_ENABLED", "false").lower() == "true":
+        if pipeline_cron:
+            configure_job(
+                "pipeline",
+                lambda: run_scheduled_pipeline_job(SessionLocal),
+                enabled=True,
+                trigger_type="cron",
+                cron_expression=pipeline_cron,
+            )
+        else:
+            pipeline_interval = int(os.getenv("PIPELINE_INTERVAL_MINUTES", "60"))
+            configure_job(
+                "pipeline",
+                lambda: run_scheduled_pipeline_job(SessionLocal),
+                enabled=True,
+                trigger_type="interval",
+                interval_minutes=pipeline_interval,
+            )
+
 
 @app.get("/")
 def home():
@@ -586,7 +617,6 @@ def health_check(db: Session = Depends(get_db)):
 @app.get("/dashboard")
 def dashboard(db: Session = Depends(get_db)):
     latest_job = db.query(SyncJob).order_by(SyncJob.id.desc()).first()
-    scheduler_state = get_scheduler_state()
     analytics = get_quarantine_analytics()
     failed_records = analytics["failed_records"]
     success_records = analytics["success_records"]
@@ -594,7 +624,7 @@ def dashboard(db: Session = Depends(get_db)):
     return {
         "success_rate": analytics["success_rate"],
         "failed_records": failed_records,
-        "active_jobs": 1 if scheduler_state["enabled"] else 0,
+        "active_jobs": count_active_jobs(),
         "last_sync_job": {
             "status": latest_job.status,
             "start_time": latest_job.start_time,
@@ -630,8 +660,7 @@ def dashboard_overview(
     _: User = Depends(get_current_user),
 ):
     latest_job = db.query(SyncJob).order_by(SyncJob.id.desc()).first()
-    scheduler_state = get_scheduler_state()
-    scheduler_enabled = bool(scheduler_state.get("enabled"))
+    scheduler_enabled = any_scheduler_enabled()
     analytics = resolve_quarantine_analytics(db)
     lineage_nodes = db.query(LineageNode).order_by(LineageNode.id.asc()).all()
     lineage_edges = db.query(LineageEdge).order_by(LineageEdge.id.asc()).all()
@@ -1168,9 +1197,20 @@ def get_sync_jobs(db: Session = Depends(get_db)):
 
 @app.post("/sync/jobs/{job_id}/retry")
 def retry_sync_job(job_id: int, db: Session = Depends(get_db)):
+    from app.db.snowflake import is_snowflake_enabled
+
     job = db.query(SyncJob).filter(SyncJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Sync job not found")
+
+    if not is_snowflake_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Snowflake sync is disabled. Set SNOWFLAKE_ENABLED=true with valid credentials, "
+                "or use Postgres-only mode (SNOWFLAKE_ENABLED=false) after your trial ends."
+            ),
+        )
 
     try:
         return run_sync_job(db, triggered_by=f"retry:{job_id}")
@@ -1194,6 +1234,54 @@ def toggle_sync_scheduler(payload: SchedulerToggleRequest):
 @app.get("/sync/scheduler")
 def get_sync_scheduler():
     return get_scheduler_state()
+
+
+def _apply_scheduler_config(payload: SchedulerJobConfigRequest):
+    job_type = payload.job_type
+    if payload.enabled:
+        try:
+            configure_job(
+                job_type,
+                _scheduler_callback_for(job_type),
+                enabled=True,
+                trigger_type=payload.trigger_type,
+                interval_minutes=payload.interval_minutes,
+                cron_expression=payload.cron_expression,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+    else:
+        disable_job(job_type)
+    return get_all_job_states()
+
+
+def _scheduler_callback_for(job_type: str):
+    if job_type == "pipeline":
+        return lambda: run_scheduled_pipeline_job(SessionLocal)
+    return lambda: run_scheduled_sync_job(SessionLocal)
+
+
+@app.get("/scheduler", response_model=SchedulerOverviewOut)
+def get_job_scheduler(_: User = Depends(require_admin)):
+    return {"jobs": get_all_job_states()}
+
+
+@app.put("/scheduler", response_model=SchedulerOverviewOut)
+def configure_job_scheduler(
+    payload: SchedulerJobConfigRequest,
+    _: User = Depends(require_admin),
+):
+    jobs = _apply_scheduler_config(payload)
+    return {"jobs": jobs}
+
+
+@app.post("/scheduler", response_model=SchedulerOverviewOut)
+def configure_job_scheduler_post(
+    payload: SchedulerJobConfigRequest,
+    _: User = Depends(require_admin),
+):
+    jobs = _apply_scheduler_config(payload)
+    return {"jobs": jobs}
 
 
 @app.get("/analytics/snowflake")
