@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy import Column, DateTime, Float, Integer, String
 
 from app.database import Base
 from app.models.user import User
@@ -137,9 +137,40 @@ class CatalogAsset(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class DuplicateReview(Base):
+    __tablename__ = "duplicate_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    left_id = Column(Integer, nullable=False, index=True)
+    right_id = Column(Integer, nullable=False, index=True)
+    status = Column(String, nullable=False, default="dismissed")
+    reviewed_by = Column(String, nullable=False, default="system")
+    note = Column(String, nullable=False, default="")
+    confidence = Column(Float, nullable=False, default=0.0)
+    reviewed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class IngestionJob(Base):
+    __tablename__ = "ingestion_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="queued", index=True)
+    total_rows = Column(Integer, nullable=False, default=0)
+    processed_rows = Column(Integer, nullable=False, default=0)
+    inserted_rows = Column(Integer, nullable=False, default=0)
+    error_message = Column(String, nullable=False, default="")
+    created_by = Column(String, nullable=False, default="system")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
 __all__ = [
     "AICopilotActionLog",
     "CatalogAsset",
+    "DuplicateReview",
+    "IngestionJob",
     "AuditLog",
     "LineageEdge",
     "LineageNode",

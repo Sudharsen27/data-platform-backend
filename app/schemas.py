@@ -217,6 +217,51 @@ class MasterDataCompareOut(BaseModel):
     is_published: bool
 
 
+class DuplicateCandidateOut(BaseModel):
+    left_id: int
+    right_id: int
+    left_name: str
+    right_name: str
+    left_email: str
+    right_email: str
+    confidence: float
+    reason: str
+
+
+class DuplicateCandidatesOut(BaseModel):
+    items: list[DuplicateCandidateOut]
+    total: int
+
+
+class DuplicateMergeRequest(BaseModel):
+    left_id: int
+    right_id: int
+    survivor_id: int | None = None
+
+
+class DuplicateRejectRequest(BaseModel):
+    left_id: int
+    right_id: int
+    note: str = ""
+
+
+class IngestionJobOut(BaseModel):
+    id: int
+    filename: str
+    status: str
+    total_rows: int
+    processed_rows: int
+    inserted_rows: int
+    error_message: str = ""
+    created_by: str
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class LineageNodeOut(BaseModel):
     id: int
     key: str

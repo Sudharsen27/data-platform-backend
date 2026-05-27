@@ -6,9 +6,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deps.auth import require_admin
+from app.deps.auth import get_current_user, require_admin
 from app.models import User
 from app.services.audit_log import write_audit_log
+from app.utils.security import hash_password, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -41,6 +42,29 @@ class UserStatusBody(BaseModel):
     is_active: bool
 
 
+class MyProfileOut(BaseModel):
+    id: int
+    full_name: str
+    email: str
+    company_name: str | None
+    role: str
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MyProfileUpdateBody(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=120)
+    company_name: str | None = Field(default=None, max_length=120)
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=256)
+
+
 def _count_active_admins(db: Session) -> int:
     return (
         db.query(func.count(User.id))
@@ -63,6 +87,69 @@ def list_users(
 ):
     users = db.query(User).order_by(User.id.asc()).all()
     return users
+
+
+@router.get("/me", response_model=MyProfileOut)
+def get_my_profile(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@router.put("/me", response_model=MyProfileOut)
+def update_my_profile(
+    body: MyProfileUpdateBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    next_full_name = body.full_name.strip()
+    if not next_full_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Full name is required",
+        )
+    current_user.full_name = next_full_name
+    current_user.company_name = (body.company_name or "").strip() or None
+    db.add(current_user)
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="profile_update",
+        entity=f"user:{current_user.id}",
+        old_value="",
+        new_value=f"name={current_user.full_name}",
+    )
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.put("/me/password")
+def update_my_password(
+    body: ChangePasswordBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not verify_password(body.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+    if body.current_password == body.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password",
+        )
+    current_user.password_hash = hash_password(body.new_password)
+    db.add(current_user)
+    write_audit_log(
+        db,
+        user_id=current_user.email,
+        action="password_change",
+        entity=f"user:{current_user.id}",
+        old_value="",
+        new_value="password_changed",
+    )
+    db.commit()
+    return {"message": "Password updated successfully"}
 
 
 @router.put("/{user_id}/role", response_model=UserListItem)
