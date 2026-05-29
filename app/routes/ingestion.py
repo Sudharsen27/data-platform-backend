@@ -1,8 +1,7 @@
 import csv
-import os
+import io
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from threading import Thread
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -16,14 +15,6 @@ from app.services.audit_log import write_audit_log
 
 router = APIRouter(prefix="/ingestion", tags=["ingestion"])
 
-UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _safe_name(value: str) -> str:
-    return _SAFE_NAME_RE.sub("_", (value or "").strip()) or "upload.csv"
-
 
 def _norm_email(country: str, item_type: str, order_id: int) -> str:
     slug_country = re.sub(r"[^a-z0-9]+", "-", (country or "").strip().lower()).strip("-") or "unknown"
@@ -31,7 +22,7 @@ def _norm_email(country: str, item_type: str, order_id: int) -> str:
     return f"{slug_country}.{slug_item}.{order_id % 50000}@sales.local"
 
 
-def _run_ingestion_job(job_id: int, csv_path: Path, actor_email: str) -> None:
+def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> None:
     db = SessionLocal()
     try:
         job = db.query(IngestionJob).filter(IngestionJob.id == job_id).first()
@@ -45,8 +36,13 @@ def _run_ingestion_job(job_id: int, csv_path: Path, actor_email: str) -> None:
         batch: list[MasterData] = []
         total = 0
         inserted = 0
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
+        text_stream = io.TextIOWrapper(
+            io.BytesIO(csv_content),
+            encoding="utf-8-sig",
+            newline="",
+        )
+        try:
+            reader = csv.DictReader(text_stream)
             for row in reader:
                 total += 1
                 country = (row.get("Country") or "").strip()
@@ -79,6 +75,8 @@ def _run_ingestion_job(job_id: int, csv_path: Path, actor_email: str) -> None:
                 db.bulk_save_objects(batch)
                 db.commit()
                 inserted += len(batch)
+        finally:
+            text_stream.close()
 
         job.total_rows = total
         job.processed_rows = total
@@ -105,10 +103,6 @@ def _run_ingestion_job(job_id: int, csv_path: Path, actor_email: str) -> None:
             db.commit()
     finally:
         db.close()
-        try:
-            csv_path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 @router.post("/upload", response_model=IngestionJobOut)
@@ -121,13 +115,9 @@ async def upload_csv_and_start_job(
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
 
-    safe_name = _safe_name(filename)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    stored_path = UPLOAD_DIR / f"{ts}_{safe_name}"
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    stored_path.write_bytes(content)
 
     job = IngestionJob(
         filename=filename,
@@ -149,7 +139,7 @@ async def upload_csv_and_start_job(
 
     worker = Thread(
         target=_run_ingestion_job,
-        args=(job.id, stored_path, actor.email),
+        args=(job.id, content, actor.email),
         daemon=True,
     )
     worker.start()
@@ -188,4 +178,3 @@ def get_ingestion_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
-
