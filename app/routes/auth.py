@@ -1,7 +1,5 @@
 import os
-from pathlib import Path
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy.orm import Session
@@ -11,7 +9,9 @@ from app.models import User
 from app.utils.jwt import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, create_refresh_token, verify_token
 from app.utils.security import hash_password, verify_password
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+from app.env_loader import load_backend_dotenv
+
+load_backend_dotenv()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

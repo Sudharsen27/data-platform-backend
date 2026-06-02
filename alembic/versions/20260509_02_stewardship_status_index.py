@@ -1,7 +1,7 @@
 """index stewardship_queue.status for filter/count performance
 
 Revision ID: 20260509_02
-Revises: 20260508_01
+Revises: 20260509_01
 Create Date: 2026-05-09
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 
 revision: str = "20260509_02"
-down_revision: Union[str, Sequence[str], None] = "20260508_01"
+down_revision: Union[str, Sequence[str], None] = "20260509_01"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

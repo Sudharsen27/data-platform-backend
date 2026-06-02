@@ -1,0 +1,29 @@
+# Render Blueprint — backend API (https://render.com)
+# Link a Render Postgres instance; Render injects DATABASE_URL (postgres:// or postgresql://).
+# The app normalizes it to postgresql+psycopg2:// automatically (see app/db_url.py).
+
+services:
+  - type: web
+    name: mini-mdm-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: FRONTEND_URL
+        sync: false
+      - key: SNOWFLAKE_ENABLED
+        value: "false"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mdm-postgres
+          property: connectionString
+
+databases:
+  - name: mdm-postgres
+    databaseName: mdm_platform
+    user: mdm

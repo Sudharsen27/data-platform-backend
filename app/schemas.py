@@ -191,6 +191,50 @@ class StewardshipBulkOutcome(BaseModel):
     missing_count: int
 
 
+class AnnotationCreateIn(BaseModel):
+    record_id: int
+    comment: str
+    status: str = "needs_review"
+
+
+class AnnotationUpdateIn(BaseModel):
+    comment: str
+    status: str
+
+
+class AnnotationOut(BaseModel):
+    id: int
+    record_id: int
+    comment: str
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AnnotationHistoryOut(BaseModel):
+    id: int
+    annotation_id: int
+    action: str
+    old_value: str
+    new_value: str
+    acted_by: str
+    acted_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AnnotationListOut(BaseModel):
+    items: list[AnnotationOut]
+    total: int
+    offset: int
+    limit: int
+
+
 class MasterDataOut(BaseModel):
     id: int
     source_queue_id: int

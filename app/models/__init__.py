@@ -166,11 +166,37 @@ class IngestionJob(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class RecordAnnotation(Base):
+    __tablename__ = "record_annotations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    record_id = Column(Integer, nullable=False, index=True)
+    comment = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="needs_review", index=True)
+    created_by = Column(String, nullable=False, default="unknown")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AnnotationHistory(Base):
+    __tablename__ = "annotation_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    annotation_id = Column(Integer, nullable=False, index=True)
+    action = Column(String, nullable=False, default="create")
+    old_value = Column(String, nullable=False, default="")
+    new_value = Column(String, nullable=False, default="")
+    acted_by = Column(String, nullable=False, default="unknown")
+    acted_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
 __all__ = [
     "AICopilotActionLog",
     "CatalogAsset",
     "DuplicateReview",
     "IngestionJob",
+    "RecordAnnotation",
+    "AnnotationHistory",
     "AuditLog",
     "LineageEdge",
     "LineageNode",

@@ -1,18 +1,12 @@
 import os
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+from app.db_url import get_database_url
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/mdm_platform",
-)
+DATABASE_URL = get_database_url()
 
-# Fail fast when Postgres is down instead of hanging the API for minutes.
 _connect_args = {}
 if DATABASE_URL.startswith("postgresql"):
     _connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))

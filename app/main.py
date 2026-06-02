@@ -83,6 +83,7 @@ from app.routes.catalog import router as catalog_router
 from app.routes.master_data import router as master_data_router
 from app.routes.rules_engine import router as rules_engine_router
 from app.routes.ingestion import router as ingestion_router
+from app.routes.annotations import router as annotations_router
 from app.services.master_data_publish import publish_stewardship_to_master
 from app.deps.auth import get_current_user, require_admin, require_permission
 from app.services.audit_log import write_audit_log
@@ -103,6 +104,7 @@ app.include_router(catalog_router)
 app.include_router(master_data_router)
 app.include_router(rules_engine_router)
 app.include_router(ingestion_router)
+app.include_router(annotations_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [

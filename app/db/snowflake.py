@@ -1,10 +1,10 @@
 import os
-from pathlib import Path
 
 import snowflake.connector
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+from app.env_loader import load_backend_dotenv
+
+load_backend_dotenv()
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 
