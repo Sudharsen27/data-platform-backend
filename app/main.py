@@ -619,7 +619,10 @@ def health_check(db: Session = Depends(get_db)):
 
 
 @app.get("/dashboard")
-def dashboard(db: Session = Depends(get_db)):
+def dashboard(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     latest_job = db.query(SyncJob).order_by(SyncJob.id.desc()).first()
     analytics = get_quarantine_analytics()
     failed_records = analytics["failed_records"]
@@ -703,7 +706,10 @@ def dashboard_overview(
 
 
 @app.get("/quarantine", response_model=List[QuarantineOut])
-def get_quarantine(db: Session = Depends(get_db)):
+def get_quarantine(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     return db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
 
 
@@ -984,6 +990,7 @@ def get_quarantine_paged(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
 ):
     total = db.query(QuarantineData).count()
     items = (
@@ -1177,7 +1184,10 @@ def delete_rule(
 
 
 @app.post("/sync/snowflake")
-def trigger_snowflake_sync(db: Session = Depends(get_db)):
+def trigger_snowflake_sync(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
     from app.db.snowflake import is_snowflake_enabled
 
     if not is_snowflake_enabled():
@@ -1195,12 +1205,19 @@ def trigger_snowflake_sync(db: Session = Depends(get_db)):
 
 
 @app.get("/sync/jobs", response_model=List[SyncJobOut])
-def get_sync_jobs(db: Session = Depends(get_db)):
+def get_sync_jobs(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     return db.query(SyncJob).order_by(SyncJob.id.desc()).limit(20).all()
 
 
 @app.post("/sync/jobs/{job_id}/retry")
-def retry_sync_job(job_id: int, db: Session = Depends(get_db)):
+def retry_sync_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
     from app.db.snowflake import is_snowflake_enabled
 
     job = db.query(SyncJob).filter(SyncJob.id == job_id).first()
@@ -1223,7 +1240,10 @@ def retry_sync_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/sync/scheduler")
-def toggle_sync_scheduler(payload: SchedulerToggleRequest):
+def toggle_sync_scheduler(
+    payload: SchedulerToggleRequest,
+    _: User = Depends(require_admin),
+):
     if payload.enabled:
         configure_sync_schedule(
             lambda: run_scheduled_sync_job(SessionLocal),
@@ -1236,7 +1256,7 @@ def toggle_sync_scheduler(payload: SchedulerToggleRequest):
 
 
 @app.get("/sync/scheduler")
-def get_sync_scheduler():
+def get_sync_scheduler(_: User = Depends(get_current_user)):
     return get_scheduler_state()
 
 
@@ -1289,7 +1309,7 @@ def configure_job_scheduler_post(
 
 
 @app.get("/analytics/snowflake")
-def snowflake_analytics():
+def snowflake_analytics(_: User = Depends(get_current_user)):
     try:
         return get_quarantine_analytics()
     except Exception as error:
@@ -1299,7 +1319,10 @@ def snowflake_analytics():
 
 
 @app.get("/export/quarantine.csv")
-def export_quarantine_csv(db: Session = Depends(get_db)):
+def export_quarantine_csv(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     rows = db.query(QuarantineData).order_by(QuarantineData.id.asc()).all()
     buffer = StringIO()
     csv_writer = writer(buffer)
@@ -1316,7 +1339,7 @@ def export_quarantine_csv(db: Session = Depends(get_db)):
 
 
 @app.get("/export/analytics.csv")
-def export_analytics_csv():
+def export_analytics_csv(_: User = Depends(get_current_user)):
     analytics = get_quarantine_analytics()
     buffer = StringIO()
     csv_writer = writer(buffer)
@@ -1365,10 +1388,13 @@ def trigger_pipeline_run(
 
 
 @app.get("/pipeline/status")
-def get_pipeline_status():
+def get_pipeline_status(_: User = Depends(get_current_user)):
     return get_pipeline_state()
 
 
 @app.get("/pipeline/runs", response_model=List[PipelineRunOut])
-def get_pipeline_runs(db: Session = Depends(get_db)):
+def get_pipeline_runs(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     return db.query(PipelineRun).order_by(PipelineRun.id.desc()).limit(100).all()

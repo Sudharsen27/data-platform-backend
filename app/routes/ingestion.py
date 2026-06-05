@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
 from app.deps.auth import require_admin
-from app.models import IngestionJob, MasterData, User
+from app.models import IngestionJob, MasterData, QuarantineData, User
 from app.schemas import IngestionJobOut
 from app.services.audit_log import write_audit_log
 
 router = APIRouter(prefix="/ingestion", tags=["ingestion"])
+
+_ALLOWED_TARGETS = frozenset({"quarantine", "golden"})
 
 
 def _norm_email(country: str, item_type: str, order_id: int) -> str:
@@ -22,7 +24,34 @@ def _norm_email(country: str, item_type: str, order_id: int) -> str:
     return f"{slug_country}.{slug_item}.{order_id % 50000}@sales.local"
 
 
-def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> None:
+def _parse_csv_row(row: dict) -> dict | None:
+    """Parse a CSV row into name/email/error. Supports name+email or sales schema."""
+    name = (row.get("name") or row.get("Name") or "").strip()
+    email = (row.get("email") or row.get("Email") or "").strip()
+    error = (row.get("error") or row.get("Error") or "").strip()
+
+    if not name and not email:
+        country = (row.get("Country") or "").strip()
+        item_type = (row.get("Item Type") or "").strip()
+        order_id_raw = (row.get("Order ID") or "").strip()
+        if order_id_raw.isdigit():
+            order_id = int(order_id_raw)
+            name = f"{country} {item_type}".strip() or "Unknown Record"
+            email = _norm_email(country, item_type, order_id)
+
+    if not name and not email:
+        return None
+
+    if not error:
+        if not email:
+            error = "Missing email"
+        elif "@" not in email:
+            error = "Invalid email format"
+
+    return {"name": name or "Unknown", "email": email, "error": error}
+
+
+def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str, target: str) -> None:
     db = SessionLocal()
     try:
         job = db.query(IngestionJob).filter(IngestionJob.id == job_id).first()
@@ -33,7 +62,7 @@ def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> Non
         db.add(job)
         db.commit()
 
-        batch: list[MasterData] = []
+        batch: list = []
         total = 0
         inserted = 0
         text_stream = io.TextIOWrapper(
@@ -45,21 +74,28 @@ def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> Non
             reader = csv.DictReader(text_stream)
             for row in reader:
                 total += 1
-                country = (row.get("Country") or "").strip()
-                item_type = (row.get("Item Type") or "").strip()
-                order_id_raw = (row.get("Order ID") or "").strip()
-                if not order_id_raw.isdigit():
+                parsed = _parse_csv_row(row)
+                if not parsed:
                     continue
-                order_id = int(order_id_raw)
-                name = f"{country} {item_type}".strip() or "Unknown Record"
-                email = _norm_email(country, item_type, order_id)
-                batch.append(
-                    MasterData(
-                        source_queue_id=order_id,
-                        name=name,
-                        email=email,
+
+                if target == "golden":
+                    batch.append(
+                        MasterData(
+                            source_queue_id=total,
+                            name=parsed["name"],
+                            email=parsed["email"],
+                        )
                     )
-                )
+                else:
+                    batch.append(
+                        QuarantineData(
+                            name=parsed["name"],
+                            email=parsed["email"],
+                            error=parsed["error"],
+                            match_status="new",
+                        )
+                    )
+
                 if len(batch) >= 10000:
                     db.bulk_save_objects(batch)
                     db.commit()
@@ -87,10 +123,10 @@ def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> Non
         write_audit_log(
             db,
             user_id=actor_email,
-            action="ingestion_complete",
+            action="quarantine_csv_import" if target == "quarantine" else "ingestion_complete",
             entity=f"ingestion:{job.id}",
             old_value="",
-            new_value=f"inserted={inserted}",
+            new_value=f"target={target};inserted={inserted}",
         )
         db.commit()
     except Exception as exc:  # pragma: no cover
@@ -108,9 +144,17 @@ def _run_ingestion_job(job_id: int, csv_content: bytes, actor_email: str) -> Non
 @router.post("/upload", response_model=IngestionJobOut)
 async def upload_csv_and_start_job(
     file: UploadFile = File(...),
+    target: str = Query("quarantine"),
     db: Session = Depends(get_db),
     actor: User = Depends(require_admin),
 ):
+    normalized_target = (target or "quarantine").strip().lower()
+    if normalized_target not in _ALLOWED_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail="target must be 'quarantine' or 'golden'",
+        )
+
     filename = file.filename or "upload.csv"
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
@@ -123,6 +167,7 @@ async def upload_csv_and_start_job(
         filename=filename,
         status="queued",
         created_by=actor.email,
+        target=normalized_target,
     )
     db.add(job)
     db.commit()
@@ -133,13 +178,13 @@ async def upload_csv_and_start_job(
         action="ingestion_start",
         entity=f"ingestion:{job.id}",
         old_value="",
-        new_value=filename,
+        new_value=f"{filename};target={normalized_target}",
     )
     db.commit()
 
     worker = Thread(
         target=_run_ingestion_job,
-        args=(job.id, content, actor.email),
+        args=(job.id, content, actor.email, normalized_target),
         daemon=True,
     )
     worker.start()

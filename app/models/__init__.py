@@ -161,6 +161,7 @@ class IngestionJob(Base):
     inserted_rows = Column(Integer, nullable=False, default=0)
     error_message = Column(String, nullable=False, default="")
     created_by = Column(String, nullable=False, default="system")
+    target = Column(String, nullable=False, default="quarantine")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)

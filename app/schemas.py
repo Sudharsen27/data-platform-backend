@@ -293,6 +293,7 @@ class IngestionJobOut(BaseModel):
     id: int
     filename: str
     status: str
+    target: str = "quarantine"
     total_rows: int
     processed_rows: int
     inserted_rows: int
