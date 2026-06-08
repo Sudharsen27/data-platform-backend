@@ -397,6 +397,42 @@ class AICopilotActionLogsPageOut(BaseModel):
     limit: int
 
 
+class AICopilotPageContextIn(BaseModel):
+    page: str = ""
+    pathname: str = ""
+    page_label: str = ""
+    asset_id: int | str | None = None
+    asset_name: str = ""
+    asset_key: str = ""
+    node_key: str = ""
+    node_label: str = ""
+    rule_id: int | str | None = None
+    rule_field: str = ""
+    rule_text: str = ""
+    stewardship_id: int | str | None = None
+    task_name: str = ""
+    task_issue: str = ""
+    master_id: int | str | None = None
+    record_name: str = ""
+    record_email: str = ""
+
+
+class AICopilotChatIn(BaseModel):
+    question: str
+    page_context: AICopilotPageContextIn | None = None
+
+
+class AICopilotSourceOut(BaseModel):
+    type: str
+    id: str
+    label: str
+
+
+class AICopilotChatOut(BaseModel):
+    answer: str
+    sources: list[AICopilotSourceOut] = []
+
+
 class DashboardKpiOut(BaseModel):
     key: str
     title: str
@@ -528,3 +564,131 @@ class LineageImpactOut(BaseModel):
     edges: list[LineageEdgeOut]
     catalog_assets: list[CatalogAssetOut]
     summary: str
+
+
+class LineageImpactAssetSummary(BaseModel):
+    id: int | None = None
+    asset_key: str = ""
+    name: str = ""
+    asset_type: str = "table"
+    domain: str = ""
+    lineage_node_key: str = ""
+    layer: str = ""
+    system: str = ""
+    impact_level: str = "medium"
+
+
+class LineageImpactRuleSummary(BaseModel):
+    id: int
+    field: str
+    rule: str
+    status: str
+
+
+class LineageImpactMasterSummary(BaseModel):
+    id: int
+    name: str
+    email: str = ""
+    source_queue_id: int
+
+
+class LineageImpactScoreOut(BaseModel):
+    source_asset: str
+    source_asset_id: int | None = None
+    source_asset_key: str | None = None
+    anchor_node_key: str | None = None
+    field: str | None = None
+    impact_score: int
+    downstream_count: int
+    upstream_count: int
+    datasets_impacted: int
+    rules_impacted: int
+    reports_impacted: int
+    master_data_impacted: int
+    downstream_assets: list[LineageImpactAssetSummary]
+    upstream_assets: list[LineageImpactAssetSummary]
+    critical_dependencies: list[LineageImpactAssetSummary]
+    impacted_rules: list[LineageImpactRuleSummary] = []
+    impacted_reports: list[LineageImpactAssetSummary] = []
+    impacted_master_data: list[LineageImpactMasterSummary] = []
+    summary: str = ""
+
+
+class LineageImpactAnalyzeIn(BaseModel):
+    question: str
+    asset_id: int | None = None
+    node_key: str = ""
+    field: str = ""
+
+
+class LineageImpactItemOut(BaseModel):
+    name: str
+    type: str = "dataset"
+    impact_level: str = "medium"
+    system: str = ""
+    layer: str = ""
+
+
+class LineageImpactAnalyzeOut(BaseModel):
+    analysis: str
+    impacts: list[LineageImpactItemOut]
+    impact_score: int = 0
+    downstream_count: int = 0
+    upstream_count: int = 0
+    source_engine: str = "heuristics"
+    impact_detail: LineageImpactScoreOut | None = None
+
+
+class ClassificationAnalyzeFieldIn(BaseModel):
+    field_name: str
+    dataset_id: int | None = None
+    dataset_name: str = ""
+    description: str = ""
+    tags: str = ""
+
+
+class ClassificationFieldOut(BaseModel):
+    field_name: str
+    classification: str
+    confidence: int
+    reason: str
+    recommendations: list[str] = []
+    ai_explanation: str = ""
+    source_engine: str = "heuristics"
+
+
+class ClassificationAnalyzeDatasetIn(BaseModel):
+    dataset_id: int
+
+
+class ClassificationFieldSummary(BaseModel):
+    field_name: str
+    classification: str
+    confidence: int
+    reason: str
+    recommendations: list[str] = []
+
+
+class ClassificationDatasetOut(BaseModel):
+    dataset_id: int
+    dataset_key: str
+    dataset_name: str
+    dataset_classification: str
+    registered_pii_tier: str = ""
+    risk_score: int
+    field_count: int
+    pii_count: int
+    sensitive_count: int
+    financial_count: int = 0
+    confidential_count: int = 0
+    public_count: int = 0
+    pii_fields: list[ClassificationFieldSummary]
+    sensitive_fields: list[ClassificationFieldSummary]
+    financial_fields: list[ClassificationFieldSummary] = []
+    confidential_fields: list[ClassificationFieldSummary] = []
+    public_fields: list[ClassificationFieldSummary] = []
+    all_fields: list[ClassificationFieldSummary] = []
+    recommendations: list[str]
+    summary: str = ""
+    ai_summary: str = ""
+    source_engine: str = "heuristics"

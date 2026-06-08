@@ -10,14 +10,18 @@ from app.schemas import (
     AICopilotActionLogOut,
     AICopilotActionLogsPageOut,
     AICopilotActionResponse,
+    AICopilotChatIn,
+    AICopilotChatOut,
     AICopilotInsightOut,
     AICopilotInsightsResponse,
+    AICopilotSourceOut,
     AIStatusOut,
     AISuggestStewardshipIn,
     ExplainQuarantineIn,
     ExplainQuarantineOut,
 )
 from app.services.ai_copilot import explain_quarantine, get_ai_status
+from app.services.copilot_service import answer_governance_question
 from app.services.ai_insights import build_ai_insights
 from app.services.ai_rule_suggestions import build_rule_suggestions_from_quarantine
 from app.services.ai_stewardship_assignments import assign_stewardship_owners
@@ -31,6 +35,9 @@ _KNOWN_ACTION_KEYS = frozenset(
         "suggest_stewardship_owners",
         "explain_quarantine",
         "summarize_failed_jobs",
+        "copilot_chat",
+        "lineage_impact_analyze",
+        "classification_analyze",
     }
 )
 
@@ -97,6 +104,97 @@ def list_ai_action_logs(
 @router.get("/status", response_model=AIStatusOut)
 def read_ai_status(_: User = Depends(get_current_user)):
     return AIStatusOut(**get_ai_status())
+
+
+@router.post("/copilot/chat", response_model=AICopilotChatOut)
+def copilot_chat(
+    body: AICopilotChatIn,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("catalog:read")),
+):
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required")
+
+    page_context = None
+    if body.page_context is not None:
+        page_context = body.page_context.model_dump(exclude_none=True)
+
+    try:
+        result = answer_governance_question(
+            db,
+            question=question,
+            page_context=page_context,
+        )
+        status = "success"
+        summary = f"Copilot answered: {question[:120]}"
+        audit_new = (result.get("answer") or "")[:500]
+    except ValueError as exc:
+        _save_action_log(
+            db,
+            action_key="copilot_chat",
+            user_id=actor.email,
+            status="failure",
+            summary=str(exc)[:200],
+            payload={"question": question[:500], "error": str(exc)},
+        )
+        write_audit_log(
+            db,
+            user_id=actor.email,
+            action="ai_copilot_chat",
+            entity="copilot",
+            old_value=question[:500],
+            new_value=f"failure: {exc}",
+        )
+        db.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _save_action_log(
+            db,
+            action_key="copilot_chat",
+            user_id=actor.email,
+            status="failure",
+            summary="Copilot chat failed",
+            payload={"question": question[:500], "error": str(exc)[:300]},
+        )
+        write_audit_log(
+            db,
+            user_id=actor.email,
+            action="ai_copilot_chat",
+            entity="copilot",
+            old_value=question[:500],
+            new_value=f"failure: {str(exc)[:200]}",
+        )
+        db.commit()
+        raise HTTPException(status_code=502, detail="AI copilot request failed") from exc
+
+    sources = [
+        AICopilotSourceOut(**src) for src in (result.get("sources") or [])
+    ]
+    _save_action_log(
+        db,
+        action_key="copilot_chat",
+        user_id=actor.email,
+        status=status,
+        summary=summary,
+        payload={
+            "question": question[:500],
+            "page_context": page_context or {},
+            "source_engine": result.get("source_engine"),
+            "context_summary": result.get("context_summary"),
+            "source_count": len(sources),
+        },
+    )
+    write_audit_log(
+        db,
+        user_id=actor.email,
+        action="ai_copilot_chat",
+        entity="copilot",
+        old_value=question[:500],
+        new_value=audit_new,
+    )
+    db.commit()
+    return AICopilotChatOut(answer=result["answer"], sources=sources)
 
 
 @router.post("/actions/explain-quarantine", response_model=ExplainQuarantineOut)

@@ -61,6 +61,19 @@ def get_ai_status() -> dict:
             "mode": "disabled",
         }
 
+    if provider == "groq":
+        from app.services.copilot_service import groq_is_configured, groq_model
+
+        model = groq_model()
+        configured = groq_is_configured()
+        return {
+            "enabled": True,
+            "provider": "groq",
+            "model": model,
+            "available": configured,
+            "mode": "groq" if configured else "heuristics",
+        }
+
     if provider == "ollama":
         model = ollama_model()
         reachable = ollama_is_reachable()

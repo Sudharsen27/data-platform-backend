@@ -80,6 +80,7 @@ from app.routes.users import router as users_router
 from app.routes.lineage import router as lineage_router
 from app.routes.ai import router as ai_router
 from app.routes.catalog import router as catalog_router
+from app.routes.classification import router as classification_router
 from app.routes.master_data import router as master_data_router
 from app.routes.rules_engine import router as rules_engine_router
 from app.routes.ingestion import router as ingestion_router
@@ -101,6 +102,7 @@ app.include_router(users_router)
 app.include_router(lineage_router)
 app.include_router(ai_router)
 app.include_router(catalog_router)
+app.include_router(classification_router)
 app.include_router(master_data_router)
 app.include_router(rules_engine_router)
 app.include_router(ingestion_router)
