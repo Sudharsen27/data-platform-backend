@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     CatalogAsset,
+    GlossaryEntry,
     LineageEdge,
     LineageNode,
     MasterData,
@@ -17,6 +18,56 @@ from app.models import (
     RecordAnnotation,
     Rule,
     StewardshipQueue,
+)
+
+_REMEDIATION_QUESTION_HINTS = (
+    "why did this record fail",
+    "why did this fail",
+    "how can i fix",
+    "how to fix",
+    "business impact",
+    "remediation",
+    "root cause",
+    "suggested fix",
+    "explain failure",
+)
+
+_RULE_RECOMMENDATION_HINTS = (
+    "rule",
+    "rules",
+    "quality check",
+    "quality checks",
+    "validation",
+    "missing governance",
+    "recommend",
+    "suggest rule",
+    "what rules",
+    "data quality rule",
+)
+
+_DOCUMENTATION_QUESTION_HINTS = (
+    "documentation",
+    "document",
+    "purpose of this dataset",
+    "business purpose",
+    "governance notes",
+    "key fields",
+    "usage guidelines",
+    "compliance",
+    "data owner",
+    "describe customer master",
+    "describe dataset",
+)
+
+_GLOSSARY_QUESTION_HINTS = (
+    "glossary",
+    "definition",
+    "define",
+    "what is",
+    "explain",
+    "describe",
+    "business term",
+    "meaning of",
 )
 
 _CLASSIFICATION_QUESTION_HINTS = (
@@ -30,6 +81,21 @@ _CLASSIFICATION_QUESTION_HINTS = (
     "financial data",
     "which datasets contain",
     "sensitive fields",
+)
+
+_GOVERNANCE_SCORE_HINTS = (
+    "governance score",
+    "governance health",
+    "governance maturity",
+    "governance gap",
+    "governance gaps",
+    "need attention",
+    "needs attention",
+    "which datasets",
+    "overall score",
+    "health dashboard",
+    "kpi",
+    "coverage",
 )
 
 _IMPACT_QUESTION_HINTS = (
@@ -162,9 +228,62 @@ def _catalog_to_dict(asset: CatalogAsset) -> dict[str, Any]:
     }
 
 
-def _extract_glossary_terms(assets: list[CatalogAsset], tokens: list[str]) -> list[dict[str, Any]]:
+def _load_saved_glossary_map(
+    db: Session, asset_ids: list[int], tokens: list[str]
+) -> dict[tuple[int, str], GlossaryEntry]:
+    if not asset_ids:
+        return {}
+    q = db.query(GlossaryEntry).filter(GlossaryEntry.catalog_asset_id.in_(asset_ids))
+    if tokens:
+        clauses = []
+        for token in tokens:
+            clauses.append(GlossaryEntry.field_name.ilike(f"%{token}%"))
+            clauses.append(GlossaryEntry.title.ilike(f"%{token}%"))
+            clauses.append(GlossaryEntry.definition.ilike(f"%{token}%"))
+        q = q.filter(or_(*clauses))
+    rows = q.order_by(GlossaryEntry.updated_at.desc()).limit(_MAX_GLOSSARY_TERMS * 2).all()
+    result: dict[tuple[int, str], GlossaryEntry] = {}
+    for row in rows:
+        key = (row.catalog_asset_id, (row.field_name or "").lower())
+        if key not in result:
+            result[key] = row
+    return result
+
+
+def _glossary_entry_to_term(row: GlossaryEntry, asset: CatalogAsset | None = None) -> dict[str, Any]:
+    return {
+        "term": row.field_name or (asset.name if asset else ""),
+        "title": row.title,
+        "definition": row.definition,
+        "usage": row.usage,
+        "governance_notes": row.governance_notes,
+        "status": row.status,
+        "source_asset": asset.asset_key if asset else "",
+        "domain": asset.domain if asset else "",
+        "saved": True,
+    }
+
+
+def _extract_glossary_terms(
+    db: Session,
+    assets: list[CatalogAsset],
+    tokens: list[str],
+) -> list[dict[str, Any]]:
     terms: list[dict[str, Any]] = []
     seen: set[str] = set()
+    asset_by_id = {a.id: a for a in assets}
+    saved_map = _load_saved_glossary_map(db, [a.id for a in assets], tokens)
+
+    for (asset_id, field_key), row in saved_map.items():
+        asset = asset_by_id.get(asset_id)
+        term_key = field_key or f"dataset:{asset_id}"
+        if term_key in seen:
+            continue
+        seen.add(term_key)
+        terms.append(_glossary_entry_to_term(row, asset))
+        if len(terms) >= _MAX_GLOSSARY_TERMS:
+            return terms
+
     for asset in assets:
         fields = [f.strip() for f in (asset.schema_fields or "").split(",") if f.strip()]
         for field in fields:
@@ -173,13 +292,22 @@ def _extract_glossary_terms(assets: list[CatalogAsset], tokens: list[str]) -> li
                 continue
             if tokens and not _matches_text(field, tokens) and not _matches_text(asset.name, tokens):
                 continue
+            saved = saved_map.get((asset.id, key))
+            if saved:
+                seen.add(key)
+                terms.append(_glossary_entry_to_term(saved, asset))
+                continue
             seen.add(key)
             terms.append(
                 {
                     "term": field,
-                    "definition": f"Field on {asset.name} ({asset.asset_key}) in {asset.domain or 'general'} domain.",
+                    "title": field.replace("_", " ").title(),
+                    "definition": (
+                        f"Field on {asset.name} ({asset.asset_key}) in {asset.domain or 'general'} domain."
+                    ),
                     "source_asset": asset.asset_key,
                     "domain": asset.domain,
+                    "saved": False,
                 }
             )
             if len(terms) >= _MAX_GLOSSARY_TERMS:
@@ -440,9 +568,10 @@ def build_governance_context(
             db.query(CatalogAsset).order_by(CatalogAsset.id.asc()).limit(_MAX_CATALOG).all()
         )
 
-    glossary_terms = _extract_glossary_terms(catalog_assets, tokens)
+    glossary_terms = _extract_glossary_terms(db, catalog_assets, tokens)
     if not glossary_terms and tokens:
         glossary_terms = _extract_glossary_terms(
+            db,
             db.query(CatalogAsset).order_by(CatalogAsset.id.asc()).limit(_MAX_CATALOG).all(),
             tokens,
         )
@@ -493,6 +622,184 @@ def build_governance_context(
                 if "masking" in question_lower or "pii" in question_lower
                 else [],
             }
+
+    glossary_analysis = None
+    if any(h in question_lower for h in _GLOSSARY_QUESTION_HINTS) or "glossary" in question_lower:
+        from app.services.glossary_generator_service import (
+            generate_dataset_glossary,
+            generate_field_glossary,
+            get_saved_glossary_entries,
+        )
+
+        pc = page_context or {}
+        field_hint = ""
+        for token in tokens:
+            if "_" in token or token.endswith("id") or token in ("email", "phone", "name"):
+                field_hint = token
+                break
+        if not field_hint and "customer_email" in question_lower:
+            field_hint = "customer_email"
+        if not field_hint and "customer_id" in question_lower:
+            field_hint = "customer_id"
+
+        if pc.get("asset_id") and str(pc.get("asset_id")).strip().isdigit():
+            asset_id = int(pc["asset_id"])
+            if field_hint:
+                saved = get_saved_glossary_entries(
+                    db, catalog_asset_id=asset_id, field_name=field_hint, status="approved"
+                )
+                if saved:
+                    row = saved[0]
+                    glossary_analysis = {
+                        "field": {
+                            "field_name": row.field_name,
+                            "title": row.title,
+                            "definition": row.definition,
+                            "usage": row.usage,
+                            "governance_notes": row.governance_notes,
+                            "source": "saved",
+                        }
+                    }
+                else:
+                    glossary_analysis = {
+                        "field": generate_field_glossary(
+                            field_name=field_hint,
+                            dataset_name=pc.get("asset_name", ""),
+                            description=pc.get("description", ""),
+                        )
+                    }
+            elif any(w in question_lower for w in ("describe", "dataset", "what is")):
+                glossary_analysis = {"dataset": generate_dataset_glossary(db, asset_id)}
+        elif field_hint:
+            glossary_analysis = {
+                "field": generate_field_glossary(
+                    field_name=field_hint,
+                    dataset_name=pc.get("asset_name", ""),
+                )
+            }
+        elif glossary_terms:
+            glossary_analysis = {"matched_terms": glossary_terms[:5]}
+
+    remediation_analysis = None
+    if any(h in question_lower for h in _REMEDIATION_QUESTION_HINTS) or (
+        "why" in question_lower and "fail" in question_lower
+    ):
+        from app.services.remediation_service import (
+            explain_stewardship_failure,
+            generate_remediation,
+            get_latest_remediation,
+            serialize_remediation,
+        )
+
+        pc = page_context or {}
+        sid = pc.get("stewardship_id")
+        if sid is not None and str(sid).strip().isdigit():
+            stewardship_id = int(sid)
+            saved = get_latest_remediation(db, stewardship_id)
+            if saved and saved.status in ("accepted", "resolved", "pending"):
+                remediation_analysis = serialize_remediation(saved)
+            else:
+                record = (
+                    db.query(StewardshipQueue)
+                    .filter(StewardshipQueue.id == stewardship_id)
+                    .first()
+                )
+                if record:
+                    remediation_analysis = generate_remediation(db, record)
+
+    rule_recommendation_analysis = None
+    if any(h in question_lower for h in _RULE_RECOMMENDATION_HINTS) or (
+        "should apply" in question_lower and "rule" in question_lower
+    ):
+        from app.models import RuleRecommendation
+        from app.services.rule_recommendation_service import (
+            recommend_rules_for_dataset,
+            recommend_rules_for_field,
+        )
+
+        pc = page_context or {}
+        field_hint = ""
+        for token in tokens:
+            if "_" in token or token in ("email", "phone", "customer_id"):
+                field_hint = token
+                break
+        if "customer_email" in question_lower:
+            field_hint = "customer_email"
+
+        asset_id_raw = pc.get("asset_id")
+        if asset_id_raw is not None and str(asset_id_raw).strip().isdigit():
+            asset_id = int(asset_id_raw)
+            pending = (
+                db.query(RuleRecommendation)
+                .filter(
+                    RuleRecommendation.catalog_asset_id == asset_id,
+                    RuleRecommendation.status == "pending",
+                )
+                .order_by(RuleRecommendation.confidence.desc())
+                .limit(10)
+                .all()
+            )
+            if field_hint:
+                rule_recommendation_analysis = recommend_rules_for_field(
+                    db,
+                    field_name=field_hint,
+                    dataset_id=asset_id,
+                )
+            else:
+                rule_recommendation_analysis = recommend_rules_for_dataset(db, asset_id)
+            if pending:
+                rule_recommendation_analysis = rule_recommendation_analysis or {}
+                rule_recommendation_analysis["pending_recommendations"] = [
+                    {
+                        "field_name": p.field_name,
+                        "rule_text": p.rule_text,
+                        "confidence": p.confidence,
+                        "status": p.status,
+                    }
+                    for p in pending
+                ]
+        elif field_hint:
+            rule_recommendation_analysis = recommend_rules_for_field(
+                db,
+                field_name=field_hint,
+                dataset_name=pc.get("asset_name", ""),
+            )
+
+    documentation_analysis = None
+    if any(h in question_lower for h in _DOCUMENTATION_QUESTION_HINTS) or (
+        "purpose" in question_lower and "dataset" in question_lower
+    ):
+        from app.services.dataset_documentation_service import (
+            generate_dataset_documentation,
+            get_saved_documentation,
+            serialize_documentation_row,
+        )
+
+        pc = page_context or {}
+        asset_id_raw = pc.get("asset_id")
+        if asset_id_raw is not None and str(asset_id_raw).strip().isdigit():
+            asset_id = int(asset_id_raw)
+            saved = get_saved_documentation(db, asset_id)
+            if saved and saved.status == "approved":
+                documentation_analysis = serialize_documentation_row(saved)
+            else:
+                documentation_analysis = generate_dataset_documentation(db, asset_id)
+
+    governance_score_analysis = None
+    if any(h in question_lower for h in _GOVERNANCE_SCORE_HINTS) or (
+        (page_context or {}).get("page") in ("governance", "dashboard")
+    ):
+        from app.services.governance_score_service import (
+            compute_platform_score,
+            get_dataset_governance_score,
+        )
+
+        pc = page_context or {}
+        asset_id_raw = pc.get("asset_id")
+        if asset_id_raw is not None and str(asset_id_raw).strip().isdigit():
+            governance_score_analysis = get_dataset_governance_score(db, int(asset_id_raw))
+        else:
+            governance_score_analysis = compute_platform_score(db)
 
     lineage_impact_analysis = None
     if any(h in question_lower for h in _IMPACT_QUESTION_HINTS) or (
@@ -602,7 +909,12 @@ def build_governance_context(
             }
             for a in annotations
         ],
+        "glossary_analysis": glossary_analysis,
+        "documentation_analysis": documentation_analysis,
+        "remediation_analysis": remediation_analysis,
+        "rule_recommendation_analysis": rule_recommendation_analysis,
         "classification_analysis": classification_analysis,
+        "governance_score_analysis": governance_score_analysis,
         "lineage_impact_analysis": (
             {
                 k: lineage_impact_analysis.get(k)

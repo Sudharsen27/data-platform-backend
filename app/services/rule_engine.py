@@ -84,6 +84,37 @@ def _apply_rule(
             if len(letters) < 2:
                 return "name should have at least 2 alphabetic characters"
 
+    if "unique" in normalized_rule and field_name.endswith("_id"):
+        if _is_empty(field_value):
+            return f"{field_name} is required for uniqueness checks"
+
+    if "only digits" in normalized_rule or "contain only digits" in normalized_rule:
+        if not _is_empty(field_value) and not text_value.isdigit():
+            return f"{field_name} must contain only digits"
+
+    length_match = re.search(r"length must be (\d+)", normalized_rule)
+    if length_match and not _is_empty(field_value):
+        expected = int(length_match.group(1))
+        if len(text_value) != expected:
+            return f"{field_name} length must be {expected}"
+
+    if "future date" in normalized_rule and not _is_empty(field_value):
+        from datetime import date
+
+        try:
+            parsed = date.fromisoformat(text_value[:10])
+            if parsed > date.today():
+                return f"{field_name} cannot be a future date"
+        except ValueError:
+            return f"{field_name} must be a valid date"
+
+    if "greater than or equal to zero" in normalized_rule and not _is_empty(field_value):
+        try:
+            if float(text_value) < 0:
+                return f"{field_name} must be greater than or equal to zero"
+        except ValueError:
+            return f"{field_name} must be numeric"
+
     if "format" in normalized_rule and field_name in ("email", "name", "record"):
         if field_name == "email" and "@" not in text_value and not _is_empty(field_value):
             return f"{field_name} format is invalid"

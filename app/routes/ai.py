@@ -38,6 +38,13 @@ _KNOWN_ACTION_KEYS = frozenset(
         "copilot_chat",
         "lineage_impact_analyze",
         "classification_analyze",
+        "glossary_generate",
+        "glossary_generate_dataset",
+        "documentation_generate",
+        "rule_recommend",
+        "rule_recommend_field",
+        "stewardship_explain",
+        "stewardship_remediate",
     }
 )
 

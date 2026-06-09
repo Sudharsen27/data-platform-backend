@@ -112,8 +112,101 @@ def _heuristic_answer(*, question: str, context: dict[str, Any]) -> str:
 
     glossary = context.get("glossary_terms") or []
     if glossary:
-        term_lines = [f"{t['term']} (from {t['source_asset']})" for t in glossary[:6]]
-        parts.append(f"Glossary-related fields: {', '.join(term_lines)}.")
+        for term in glossary[:4]:
+            title = term.get("title") or term.get("term")
+            definition = term.get("definition") or ""
+            if definition and len(definition) > 40:
+                parts.append(f"{title}: {definition}")
+            else:
+                parts.append(f"{title} (from {term.get('source_asset', 'catalog')})")
+    glossary_analysis = context.get("glossary_analysis") or {}
+    field_glossary = glossary_analysis.get("field") if isinstance(glossary_analysis, dict) else None
+    if field_glossary:
+        parts.append(
+            f"Glossary — {field_glossary.get('title', field_glossary.get('field_name', 'field'))}: "
+            f"{field_glossary.get('definition', '')}"
+        )
+    dataset_glossary = glossary_analysis.get("dataset") if isinstance(glossary_analysis, dict) else None
+    if dataset_glossary:
+        parts.append(
+            f"Dataset glossary — {dataset_glossary.get('dataset_title', 'Dataset')}: "
+            f"{dataset_glossary.get('dataset_definition', '')}"
+        )
+
+    remediation = context.get("remediation_analysis") or {}
+    if remediation:
+        parts.append(
+            f"Remediation — Root cause: {remediation.get('root_cause', '')}. "
+            f"Suggested fix: {remediation.get('suggested_fix', '')}"
+        )
+        if remediation.get("business_impact"):
+            parts.append(f"Business impact: {remediation['business_impact']}")
+        if remediation.get("governance_impact"):
+            parts.append(f"Governance impact: {remediation['governance_impact']}")
+
+    rule_rec = context.get("rule_recommendation_analysis") or {}
+    if rule_rec:
+        rules_list = rule_rec.get("rules") or rule_rec.get("recommended_rules") or []
+        if rules_list:
+            lines = [
+                f"{r.get('field_name')}: {r.get('rule_text')} ({r.get('rule_type')}, {r.get('confidence')}%)"
+                for r in rules_list[:6]
+            ]
+            parts.append("Recommended rules: " + "; ".join(lines))
+        risk = rule_rec.get("risk_analysis") or {}
+        if risk:
+            parts.append(
+                f"Risk — Quality: {risk.get('data_quality_risk_level', 'N/A')}, "
+                f"Governance: {risk.get('governance_risk_level', 'N/A')}, "
+                f"Compliance: {risk.get('compliance_risk_level', 'N/A')}."
+            )
+
+    score_analysis = context.get("governance_score_analysis") or {}
+    if score_analysis:
+        scope = score_analysis.get("scope", "platform")
+        overall = score_analysis.get("overall_score", 0)
+        risk = score_analysis.get("risk_level", "N/A")
+        parts.append(
+            f"Governance health ({scope}): overall score {overall}/100, risk level {risk}."
+        )
+        dims = score_analysis.get("dimensions") or {}
+        if dims:
+            low_dims = [
+                f"{k.replace('_', ' ')}: {v}%"
+                for k, v in sorted(dims.items(), key=lambda x: x[1])[:4]
+            ]
+            parts.append("Dimension scores (lowest): " + ", ".join(low_dims) + ".")
+        missing = score_analysis.get("missing_governance_areas") or []
+        if missing:
+            parts.append("Gaps: " + "; ".join(missing[:5]) + ".")
+        attention = score_analysis.get("datasets_needing_attention") or []
+        if attention and any(w in q for w in ("attention", "gap", "which dataset", "need")):
+            names = ", ".join(
+                f"{d.get('dataset_name')} ({d.get('overall_score')}/100)"
+                for d in attention[:5]
+            )
+            parts.append(f"Datasets needing attention: {names}.")
+        recs = score_analysis.get("recommendations") or []
+        if recs:
+            parts.append("Recommendations: " + " ".join(recs[:3]))
+
+    doc_analysis = context.get("documentation_analysis") or {}
+    if doc_analysis:
+        parts.append(
+            f"Dataset documentation — {doc_analysis.get('title', 'Dataset')}: "
+            f"{doc_analysis.get('summary', '')}"
+        )
+        if doc_analysis.get("purpose"):
+            parts.append(f"Purpose: {doc_analysis['purpose']}")
+        if doc_analysis.get("governance_notes"):
+            parts.append(f"Governance notes: {doc_analysis['governance_notes']}")
+        key_fields = doc_analysis.get("key_fields") or []
+        if key_fields and any(w in q for w in ("key field", "explain field", "fields")):
+            field_lines = [
+                f"{f.get('field_name')}: {f.get('description', '')[:120]}"
+                for f in key_fields[:5]
+            ]
+            parts.append("Key fields: " + "; ".join(field_lines))
 
     if "customer" in q and datasets:
         customer_assets = [d for d in datasets if "customer" in (d.get("name") or "").lower()

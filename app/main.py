@@ -81,10 +81,15 @@ from app.routes.lineage import router as lineage_router
 from app.routes.ai import router as ai_router
 from app.routes.catalog import router as catalog_router
 from app.routes.classification import router as classification_router
+from app.routes.documentation import router as documentation_router
+from app.routes.glossary import router as glossary_router
 from app.routes.master_data import router as master_data_router
+from app.routes.rule_recommendations import router as rule_recommendations_router
+from app.routes.stewardship_remediation import router as stewardship_remediation_router
 from app.routes.rules_engine import router as rules_engine_router
 from app.routes.ingestion import router as ingestion_router
 from app.routes.annotations import router as annotations_router
+from app.routes.governance import router as governance_router
 from app.services.master_data_publish import publish_stewardship_to_master
 from app.deps.auth import get_current_user, require_admin, require_permission
 from app.services.audit_log import write_audit_log
@@ -103,10 +108,15 @@ app.include_router(lineage_router)
 app.include_router(ai_router)
 app.include_router(catalog_router)
 app.include_router(classification_router)
+app.include_router(glossary_router)
+app.include_router(documentation_router)
 app.include_router(master_data_router)
 app.include_router(rules_engine_router)
+app.include_router(rule_recommendations_router)
+app.include_router(stewardship_remediation_router)
 app.include_router(ingestion_router)
 app.include_router(annotations_router)
+app.include_router(governance_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [

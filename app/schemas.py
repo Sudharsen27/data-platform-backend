@@ -692,3 +692,394 @@ class ClassificationDatasetOut(BaseModel):
     summary: str = ""
     ai_summary: str = ""
     source_engine: str = "heuristics"
+
+
+class GlossaryGenerateFieldIn(BaseModel):
+    field_name: str
+    dataset_id: int | None = None
+    dataset_name: str = ""
+    field_type: str = ""
+    description: str = ""
+    tags: str = ""
+
+
+class GlossaryFieldOut(BaseModel):
+    field_name: str = ""
+    title: str
+    definition: str
+    usage: str
+    governance_notes: str
+    examples: list[str] = []
+    source_engine: str = "heuristics"
+
+
+class GlossaryGenerateDatasetIn(BaseModel):
+    dataset_id: int
+
+
+class GlossaryFieldBriefOut(BaseModel):
+    field_name: str
+    title: str
+    definition: str
+    usage: str
+    governance_notes: str
+    examples: list[str] = []
+    source_engine: str = "heuristics"
+
+
+class GlossaryDatasetOut(BaseModel):
+    dataset_id: int
+    dataset_key: str = ""
+    dataset_title: str
+    dataset_definition: str
+    business_usage: str
+    governance_notes: str = ""
+    field_glossaries: list[GlossaryFieldBriefOut] = []
+    source_engine: str = "heuristics"
+
+
+class GlossarySaveIn(BaseModel):
+    catalog_asset_id: int
+    field_name: str = ""
+    title: str
+    definition: str
+    usage: str = ""
+    governance_notes: str = ""
+    examples: list[str] = []
+    status: str = "approved"
+
+
+class GlossaryUpdateIn(BaseModel):
+    title: str | None = None
+    definition: str | None = None
+    usage: str | None = None
+    governance_notes: str | None = None
+    examples: list[str] | None = None
+    status: str | None = None
+
+
+class GlossaryEntryOut(BaseModel):
+    id: int
+    catalog_asset_id: int
+    field_name: str
+    title: str
+    definition: str
+    usage: str
+    governance_notes: str
+    examples: list[str] = []
+    status: str
+    source_engine: str
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class GlossaryHistoryOut(BaseModel):
+    id: int
+    glossary_entry_id: int
+    action: str
+    old_value: str
+    new_value: str
+    acted_by: str
+    acted_at: datetime
+
+
+class GlossaryEntriesPageOut(BaseModel):
+    items: list[GlossaryEntryOut]
+    total: int
+
+
+class DocumentationKeyFieldOut(BaseModel):
+    field_name: str
+    description: str = ""
+    classification: str = "Unknown"
+
+
+class DocumentationGenerateIn(BaseModel):
+    dataset_id: int
+
+
+class DocumentationOut(BaseModel):
+    dataset_id: int
+    dataset_key: str = ""
+    title: str
+    summary: str
+    business_description: str = ""
+    purpose: str
+    key_fields: list[DocumentationKeyFieldOut] = []
+    owner_recommendation: str = ""
+    governance_notes: str
+    classification_summary: str = ""
+    quality_expectations: str = ""
+    usage_guidelines: str
+    compliance_considerations: str = ""
+    source_engine: str = "heuristics"
+
+
+class DocumentationSaveIn(BaseModel):
+    catalog_asset_id: int
+    title: str
+    summary: str = ""
+    business_description: str = ""
+    purpose: str = ""
+    key_fields: list[DocumentationKeyFieldOut] = []
+    owner_recommendation: str = ""
+    governance_notes: str = ""
+    classification_summary: str = ""
+    quality_expectations: str = ""
+    usage_guidelines: str = ""
+    compliance_considerations: str = ""
+    status: str = "approved"
+
+
+class DocumentationUpdateIn(BaseModel):
+    title: str | None = None
+    summary: str | None = None
+    business_description: str | None = None
+    purpose: str | None = None
+    key_fields: list[DocumentationKeyFieldOut] | None = None
+    owner_recommendation: str | None = None
+    governance_notes: str | None = None
+    classification_summary: str | None = None
+    quality_expectations: str | None = None
+    usage_guidelines: str | None = None
+    compliance_considerations: str | None = None
+    status: str | None = None
+
+
+class DocumentationEntryOut(DocumentationOut):
+    id: int
+    catalog_asset_id: int
+    status: str
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentationHistoryOut(BaseModel):
+    id: int
+    documentation_id: int
+    action: str
+    old_value: str
+    new_value: str
+    acted_by: str
+    acted_at: datetime
+
+
+class DocumentationExportOut(BaseModel):
+    format: str
+    filename: str
+    content: str
+    content_type: str
+
+
+class RuleRecommendIn(BaseModel):
+    dataset_id: int
+
+
+class RuleRecommendFieldIn(BaseModel):
+    field_name: str
+    dataset_id: int | None = None
+
+
+class RecommendedRuleOut(BaseModel):
+    field_name: str
+    rule_type: str
+    rule_text: str
+    confidence: int
+    business_reason: str = ""
+    governance_importance: str = ""
+    compliance_impact: str = ""
+    source_engine: str = "heuristics"
+
+
+class RuleRiskAnalysisOut(BaseModel):
+    data_quality_risk_score: int
+    data_quality_risk_level: str
+    governance_risk_score: int
+    governance_risk_level: str
+    compliance_risk_score: int
+    compliance_risk_level: str
+    missing_rule_gaps: int = 0
+
+
+class RuleRecommendFieldOut(BaseModel):
+    dataset_id: int | None = None
+    field_name: str
+    classification: str = ""
+    rules: list[RecommendedRuleOut]
+    risk_analysis: RuleRiskAnalysisOut
+    source_engine: str = "heuristics"
+
+
+class RuleRecommendDatasetOut(BaseModel):
+    dataset_id: int
+    dataset_key: str = ""
+    dataset_name: str
+    recommended_rules: list[RecommendedRuleOut]
+    risk_analysis: RuleRiskAnalysisOut
+    source_engine: str = "heuristics"
+
+
+class RuleRecommendationOut(BaseModel):
+    id: int
+    catalog_asset_id: int
+    field_name: str
+    rule_type: str
+    rule_text: str
+    confidence: int
+    business_reason: str
+    governance_importance: str
+    compliance_impact: str
+    status: str
+    source_engine: str
+    approved_rule_id: int | None = None
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuleRecommendationUpdateIn(BaseModel):
+    rule_text: str | None = None
+    rule_type: str | None = None
+    confidence: int | None = None
+    business_reason: str | None = None
+    governance_importance: str | None = None
+    compliance_impact: str | None = None
+
+
+class RuleRecommendationHistoryOut(BaseModel):
+    id: int
+    recommendation_id: int
+    action: str
+    old_value: str
+    new_value: str
+    acted_by: str
+    acted_at: datetime
+
+
+class RuleRecommendationsPageOut(BaseModel):
+    items: list[RuleRecommendationOut]
+    total: int
+
+
+class StewardshipExplainIn(BaseModel):
+    stewardship_id: int
+
+
+class StewardshipRemediateIn(BaseModel):
+    stewardship_id: int
+
+
+class StewardshipRemediationOut(BaseModel):
+    stewardship_id: int
+    failure_explanation: str
+    root_cause: str
+    suggested_fix: str = ""
+    business_impact: str = ""
+    governance_impact: str = ""
+    risk_score: int = 0
+    risk_level: str = "Low Risk"
+    suggested_actions: list[str] = []
+    context: dict = {}
+    source_engine: str = "heuristics"
+
+
+class StewardshipExplainOut(BaseModel):
+    stewardship_id: int
+    explanation: str
+    root_cause: str = ""
+    source_engine: str = "heuristics"
+
+
+class StewardshipRemediationEntryOut(StewardshipRemediationOut):
+    id: int
+    status: str
+    assigned_owner: str = ""
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StewardshipRemediationAssignIn(BaseModel):
+    owner_email: str
+
+
+class StewardshipRemediationHistoryOut(BaseModel):
+    id: int
+    remediation_id: int
+    action: str
+    old_value: str
+    new_value: str
+    acted_by: str
+    acted_at: datetime
+
+
+class GovernanceDimensionDetailOut(BaseModel):
+    key: str
+    label: str
+    score: int
+    weight_percent: int = 0
+
+
+class GovernanceDatasetSummaryOut(BaseModel):
+    dataset_id: int
+    dataset_name: str
+    overall_score: int
+    domain: str = ""
+    risk_level: str = "Medium Risk"
+
+
+class GovernanceDatasetAttentionOut(BaseModel):
+    dataset_id: int
+    dataset_name: str
+    overall_score: int
+    missing_governance_areas: list[str] = []
+
+
+class GovernanceDomainScoreOut(BaseModel):
+    domain: str
+    dataset_count: int
+    overall_score: int
+    risk_score: int
+    risk_level: str
+    dimensions: dict[str, int]
+    datasets: list[dict] = []
+
+
+class GovernanceDatasetScoreOut(BaseModel):
+    scope: str = "dataset"
+    dataset_id: int
+    dataset_key: str
+    dataset_name: str
+    domain: str = ""
+    overall_score: int
+    risk_score: int
+    risk_level: str
+    dimensions: dict[str, int]
+    dimension_details: list[GovernanceDimensionDetailOut]
+    missing_governance_areas: list[str] = []
+    recommendations: list[str] = []
+    field_count: int = 0
+    generated_at: str = ""
+
+
+class GovernancePlatformScoreOut(BaseModel):
+    scope: str = "platform"
+    overall_score: int
+    risk_score: int
+    risk_level: str
+    dataset_count: int
+    domain_count: int
+    dimensions: dict[str, int]
+    dimension_details: list[GovernanceDimensionDetailOut]
+    missing_governance_areas: list[str] = []
+    recommendations: list[str] = []
+    domains: list[GovernanceDomainScoreOut] = []
+    datasets: list[GovernanceDatasetSummaryOut] = []
+    datasets_needing_attention: list[GovernanceDatasetAttentionOut] = []
+    generated_at: str = ""
