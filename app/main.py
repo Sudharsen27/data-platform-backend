@@ -89,6 +89,7 @@ from app.routes.stewardship_remediation import router as stewardship_remediation
 from app.routes.rules_engine import router as rules_engine_router
 from app.routes.ingestion import router as ingestion_router
 from app.routes.annotations import router as annotations_router
+from app.routes.compliance import router as compliance_router
 from app.routes.governance import router as governance_router
 from app.services.master_data_publish import publish_stewardship_to_master
 from app.deps.auth import get_current_user, require_admin, require_permission
@@ -117,6 +118,7 @@ app.include_router(stewardship_remediation_router)
 app.include_router(ingestion_router)
 app.include_router(annotations_router)
 app.include_router(governance_router)
+app.include_router(compliance_router)
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 allowed_origins = [

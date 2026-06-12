@@ -1118,3 +1118,72 @@ class GovernancePlatformScoreOut(BaseModel):
 
 class GovernanceDashboardOut(GovernancePlatformScoreOut):
     trends: list[GovernanceTrendOut] = []
+
+
+class ComplianceAssetSummaryOut(BaseModel):
+    dataset_id: int
+    dataset_key: str = ""
+    dataset_name: str
+    domain: str = "Unassigned"
+    pii_tier: str = ""
+    dataset_classification: str = ""
+    pii_field_count: int = 0
+    sensitive_field_count: int = 0
+    classification_score: int = 0
+    documentation_score: int = 0
+    risk_score: int = 0
+    risk_level: str = "Medium Risk"
+
+
+class ComplianceDistributionOut(BaseModel):
+    label: str
+    count: int
+    color_key: str = ""
+
+
+class ComplianceCoverageChartOut(BaseModel):
+    key: str
+    label: str
+    score: int
+
+
+class ComplianceRiskOut(BaseModel):
+    risk_id: str
+    title: str
+    severity: str = "medium"
+    category: str = ""
+    affected_datasets: list[str] = []
+    description: str = ""
+
+
+class ComplianceRecommendationOut(BaseModel):
+    priority: str = "medium"
+    title: str
+    description: str = ""
+
+
+class ComplianceScoreOut(BaseModel):
+    scope: str = "platform"
+    compliance_score: int
+    risk_score: int
+    risk_level: str
+    dataset_count: int
+    pii_asset_count: int
+    sensitive_asset_count: int
+    datasets_missing_classification: int
+    datasets_missing_documentation: int
+    classification_coverage: int
+    documentation_coverage: int
+    generated_at: str = ""
+
+
+class ComplianceDashboardOut(ComplianceScoreOut):
+    governance_dimensions: dict[str, int] = {}
+    governance_overall_score: int = 0
+    asset_distribution: list[ComplianceDistributionOut] = []
+    coverage_chart: list[ComplianceCoverageChartOut] = []
+    missing_classification_datasets: list[ComplianceAssetSummaryOut] = []
+    missing_documentation_datasets: list[ComplianceAssetSummaryOut] = []
+    pii_assets: list[ComplianceAssetSummaryOut] = []
+    governance_risks: list[ComplianceRiskOut] = []
+    compliance_recommendations: list[ComplianceRecommendationOut] = []
