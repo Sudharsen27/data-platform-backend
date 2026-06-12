@@ -9,6 +9,7 @@ from app.database import get_db
 from app.deps.auth import get_current_user, require_admin
 from app.models import User
 from app.services.audit_log import write_audit_log
+from app.utils.jwt import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from app.utils.security import hash_password, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -60,6 +61,12 @@ class MyProfileUpdateBody(BaseModel):
     company_name: str | None = Field(default=None, max_length=120)
 
 
+class MyProfileUpdateOut(MyProfileOut):
+    access_token: str
+    expires_in: int
+    token_type: str = "bearer"
+
+
 class ChangePasswordBody(BaseModel):
     current_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=8, max_length=256)
@@ -94,7 +101,7 @@ def get_my_profile(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-@router.put("/me", response_model=MyProfileOut)
+@router.put("/me", response_model=MyProfileUpdateOut)
 def update_my_profile(
     body: MyProfileUpdateBody,
     db: Session = Depends(get_db),
@@ -119,7 +126,18 @@ def update_my_profile(
     )
     db.commit()
     db.refresh(current_user)
-    return current_user
+    access_token = create_access_token(
+        subject=current_user.email,
+        role=current_user.role,
+        is_active=current_user.is_active,
+        full_name=current_user.full_name,
+    )
+    return {
+        **MyProfileOut.model_validate(current_user).model_dump(),
+        "access_token": access_token,
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "token_type": "bearer",
+    }
 
 
 @router.put("/me/password")

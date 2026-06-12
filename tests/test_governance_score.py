@@ -48,7 +48,11 @@ def test_dataset_score_with_metadata():
         result = compute_dataset_score(db, asset)
         assert result["overall_score"] >= 50
         assert result["dataset_name"] == "Customer Master"
-        assert "metadata_completeness" in result["dimensions"]
+        assert "metadata_coverage" in result["dimensions"]
+        assert "governance_gaps" in result
+        platform = compute_platform_score(db)
+        assert "governance_gaps" in platform
+        assert "trends" in platform
         assert result["risk_score"] == 100 - result["overall_score"]
     finally:
         db.close()
@@ -107,3 +111,15 @@ def test_governance_score_not_found(client):
     headers = _auth_headers(client)
     response = client.get("/governance/score/999999", headers=headers)
     assert response.status_code == 404
+
+
+def test_governance_dashboard_api(client):
+    headers = _auth_headers(client)
+    response = client.get("/governance/dashboard", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert "overall_score" in body
+    assert "governance_gaps" in body
+    assert "recommendations" in body
+    assert "trends" in body
+    assert "datasets" in body

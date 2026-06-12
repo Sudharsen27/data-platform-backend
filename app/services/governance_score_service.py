@@ -20,50 +20,39 @@ from app.models import (
 from app.services.dashboard_metrics import GOVERNANCE_AUDIT_ACTIONS, SENSITIVE_PII_TIERS
 from app.services.data_classification_service import analyze_dataset
 
+GOVERNANCE_TARGET_SCORE = 70
+
 DIMENSION_KEYS = (
-    "metadata_completeness",
+    "metadata_coverage",
     "glossary_coverage",
     "documentation_coverage",
     "classification_coverage",
-    "lineage_coverage",
     "rule_coverage",
-    "data_quality_coverage",
+    "lineage_coverage",
     "stewardship_resolution_rate",
     "audit_compliance",
 )
 
 DIMENSION_LABELS = {
-    "metadata_completeness": "Metadata Completeness",
-    "glossary_coverage": "Business Glossary Coverage",
+    "metadata_coverage": "Metadata Coverage",
+    "glossary_coverage": "Glossary Coverage",
     "documentation_coverage": "Documentation Coverage",
     "classification_coverage": "Classification Coverage",
-    "lineage_coverage": "Lineage Coverage",
     "rule_coverage": "Rule Coverage",
-    "data_quality_coverage": "Data Quality Coverage",
-    "stewardship_resolution_rate": "Stewardship Resolution Rate",
+    "lineage_coverage": "Lineage Coverage",
+    "stewardship_resolution_rate": "Stewardship Resolution",
     "audit_compliance": "Audit Compliance",
 }
 
-DIMENSION_WEIGHTS = {
-    "metadata_completeness": 0.12,
-    "glossary_coverage": 0.12,
-    "documentation_coverage": 0.12,
-    "classification_coverage": 0.11,
-    "lineage_coverage": 0.10,
-    "rule_coverage": 0.11,
-    "data_quality_coverage": 0.12,
-    "stewardship_resolution_rate": 0.10,
-    "audit_compliance": 0.10,
-}
+DIMENSION_WEIGHTS = {key: round(1 / len(DIMENSION_KEYS), 4) for key in DIMENSION_KEYS}
 
 _RECOMMENDATIONS: dict[str, str] = {
-    "metadata_completeness": "Assign data owners and complete catalog metadata (description, schema fields, domain).",
+    "metadata_coverage": "Assign data owners and complete catalog metadata (description, schema fields, domain).",
     "glossary_coverage": "Generate and approve business glossary terms for key fields.",
     "documentation_coverage": "Create and approve dataset documentation with purpose and governance notes.",
     "classification_coverage": "Run classification analysis and align PII tier with field sensitivity.",
+    "rule_coverage": "Define active data quality rules for critical fields and reduce quarantine failures.",
     "lineage_coverage": "Link catalog assets to lineage nodes and document downstream dependencies.",
-    "rule_coverage": "Define active data quality rules for critical fields.",
-    "data_quality_coverage": "Reduce quarantine failures and close rule coverage gaps.",
     "stewardship_resolution_rate": "Resolve pending stewardship tasks and assign owners.",
     "audit_compliance": "Increase governance audit activity (approvals, rule changes, pipeline runs).",
 }
@@ -167,18 +156,16 @@ def _score_rules(db: Session, fields: list[str]) -> tuple[int, list[str]]:
         if any(token in (r.field or "").lower() or (r.field or "").lower() in token for r in active_rules):
             covered += 1
     coverage = min(100, round((covered / len(fields)) * 100))
-    gaps = [] if coverage >= 70 else ["quality_rules"]
-    return coverage, gaps
 
-
-def _score_data_quality(db: Session, rule_score: int) -> tuple[int, list[str]]:
     total = db.query(QuarantineData).count()
-    has_error = (QuarantineData.error.isnot(None)) & (QuarantineData.error != "")
-    failed = db.query(QuarantineData).filter(has_error).count() if total else 0
-    success_rate = round(((total - failed) / total) * 100) if total else 85
-    blended = round((success_rate * 0.6) + (rule_score * 0.4))
-    gaps = [] if blended >= 70 else ["quarantine_quality"]
-    return min(100, blended), gaps
+    if total:
+        has_error = (QuarantineData.error.isnot(None)) & (QuarantineData.error != "")
+        failed = db.query(QuarantineData).filter(has_error).count()
+        success_rate = round(((total - failed) / total) * 100)
+        coverage = min(100, round((coverage * 0.7) + (success_rate * 0.3)))
+
+    gaps = [] if coverage >= GOVERNANCE_TARGET_SCORE else ["quality_rules"]
+    return coverage, gaps
 
 
 def _score_stewardship(db: Session) -> tuple[int, list[str]]:
@@ -233,6 +220,137 @@ def _weighted_overall(dimensions: dict[str, int]) -> int:
     return round(total)
 
 
+def _gap_severity(score: int) -> str:
+    if score < 50:
+        return "high"
+    if score < GOVERNANCE_TARGET_SCORE:
+        return "medium"
+    return "low"
+
+
+def _build_governance_gaps(
+    dimensions: dict[str, int],
+    *,
+    dataset_scores: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    for key in DIMENSION_KEYS:
+        score = int(dimensions.get(key, 0))
+        if score >= GOVERNANCE_TARGET_SCORE:
+            continue
+        affected: list[str] = []
+        if dataset_scores:
+            affected = [
+                d["dataset_name"]
+                for d in dataset_scores
+                if int(d.get("dimensions", {}).get(key, 100)) < GOVERNANCE_TARGET_SCORE
+            ][:6]
+        gaps.append(
+            {
+                "dimension": key,
+                "label": DIMENSION_LABELS[key],
+                "score": score,
+                "target": GOVERNANCE_TARGET_SCORE,
+                "gap": GOVERNANCE_TARGET_SCORE - score,
+                "severity": _gap_severity(score),
+                "affected_datasets": affected,
+            }
+        )
+    return sorted(gaps, key=lambda row: row["score"])
+
+
+def _build_trends(db: Session, dimensions: dict[str, int], overall_score: int) -> list[dict[str, Any]]:
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
+    recent_audits = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.timestamp >= week_ago,
+            AuditLog.action.in_(GOVERNANCE_AUDIT_ACTIONS),
+        )
+        .count()
+    )
+    previous_audits = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.timestamp >= two_weeks_ago,
+            AuditLog.timestamp < week_ago,
+            AuditLog.action.in_(GOVERNANCE_AUDIT_ACTIONS),
+        )
+        .count()
+    )
+    audit_delta = recent_audits - previous_audits
+
+    def _direction(delta: int) -> str:
+        if delta > 0:
+            return "up"
+        if delta < 0:
+            return "down"
+        return "flat"
+
+    trends: list[dict[str, Any]] = [
+        {
+            "key": "overall_score",
+            "label": "Overall Governance",
+            "score": overall_score,
+            "direction": _direction(overall_score - GOVERNANCE_TARGET_SCORE),
+            "delta": overall_score - GOVERNANCE_TARGET_SCORE,
+            "unit": "pts vs target",
+        },
+        {
+            "key": "audit_compliance",
+            "label": "Audit Activity (7d)",
+            "score": dimensions.get("audit_compliance", 0),
+            "direction": _direction(audit_delta),
+            "delta": audit_delta,
+            "unit": "events",
+        },
+    ]
+    for key in DIMENSION_KEYS:
+        score = int(dimensions.get(key, 0))
+        trends.append(
+            {
+                "key": key,
+                "label": DIMENSION_LABELS[key],
+                "score": score,
+                "direction": _direction(score - GOVERNANCE_TARGET_SCORE),
+                "delta": score - GOVERNANCE_TARGET_SCORE,
+                "unit": "pts vs target",
+            }
+        )
+    return trends
+
+
+def _build_coverage_metrics(dimensions: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": key,
+            "label": DIMENSION_LABELS[key],
+            "score": int(dimensions.get(key, 0)),
+            "status": "healthy" if dimensions.get(key, 0) >= GOVERNANCE_TARGET_SCORE else "needs_attention",
+        }
+        for key in DIMENSION_KEYS
+    ]
+
+
+def _enrich_platform_payload(
+    db: Session,
+    payload: dict[str, Any],
+    *,
+    dataset_scores: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    dimensions = payload.get("dimensions") or {}
+    overall = int(payload.get("overall_score", 0))
+    gaps = _build_governance_gaps(dimensions, dataset_scores=dataset_scores)
+    payload["governance_gaps"] = gaps
+    payload["coverage_metrics"] = _build_coverage_metrics(dimensions)
+    payload["trends"] = _build_trends(db, dimensions, overall)
+    payload["missing_governance_areas"] = payload.get("missing_governance_areas") or [
+        gap["label"] for gap in gaps
+    ]
+    return payload
+
+
 def _build_recommendations(dimensions: dict[str, int], missing: list[str]) -> list[str]:
     recs: list[str] = []
     seen: set[str] = set()
@@ -263,16 +381,14 @@ def compute_dataset_score(db: Session, asset: CatalogAsset) -> dict[str, Any]:
     class_score, class_gaps = _score_classification(db, asset, len(fields))
     lineage_score, lineage_gaps = _score_lineage(asset, db)
     rule_score, rule_gaps = _score_rules(db, fields)
-    dq_score, dq_gaps = _score_data_quality(db, rule_score)
 
     dimensions = {
-        "metadata_completeness": meta_score,
+        "metadata_coverage": meta_score,
         "glossary_coverage": glossary_score,
         "documentation_coverage": doc_score,
         "classification_coverage": class_score,
-        "lineage_coverage": lineage_score,
         "rule_coverage": rule_score,
-        "data_quality_coverage": dq_score,
+        "lineage_coverage": lineage_score,
         "stewardship_resolution_rate": stewardship_score,
         "audit_compliance": audit_score,
     }
@@ -285,7 +401,6 @@ def compute_dataset_score(db: Session, asset: CatalogAsset) -> dict[str, Any]:
             + class_gaps
             + lineage_gaps
             + rule_gaps
-            + dq_gaps
             + stewardship_gaps
             + audit_gaps
         )
@@ -308,16 +423,21 @@ def compute_dataset_score(db: Session, asset: CatalogAsset) -> dict[str, Any]:
         for key in DIMENSION_KEYS
     ]
 
+    governance_gaps = _build_governance_gaps(dimensions)
+
     return {
         "dataset_id": asset.id,
         "dataset_key": asset.asset_key,
         "dataset_name": asset.name,
         "domain": asset.domain or "Unassigned",
         "overall_score": overall,
+        "governance_score": overall,
         "risk_score": risk_score,
         "risk_level": _risk_level(overall),
         "dimensions": dimensions,
         "dimension_details": dimension_details,
+        "coverage_metrics": _build_coverage_metrics(dimensions),
+        "governance_gaps": governance_gaps,
         "missing_governance_areas": missing_areas,
         "recommendations": _build_recommendations(dimensions, all_gaps),
         "field_count": len(fields),
@@ -365,20 +485,18 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
     if not dataset_scores:
         stewardship_score, _ = _score_stewardship(db)
         audit_score, _ = _score_audit(db)
-        dq_score, _ = _score_data_quality(db, 0)
         dimensions = {
-            "metadata_completeness": 0,
+            "metadata_coverage": 0,
             "glossary_coverage": 0,
             "documentation_coverage": 0,
             "classification_coverage": 0,
-            "lineage_coverage": 0,
             "rule_coverage": 0,
-            "data_quality_coverage": dq_score,
+            "lineage_coverage": 0,
             "stewardship_resolution_rate": stewardship_score,
             "audit_compliance": audit_score,
         }
         overall = _weighted_overall(dimensions)
-        return {
+        payload = {
             "scope": "platform",
             "overall_score": overall,
             "risk_score": max(0, 100 - overall),
@@ -395,13 +513,13 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
                 }
                 for k in DIMENSION_KEYS
             ],
-            "missing_governance_areas": [DIMENSION_LABELS[k] for k in DIMENSION_KEYS if dimensions[k] < 70],
             "recommendations": _build_recommendations(dimensions, []),
             "domains": [],
             "datasets": [],
             "datasets_needing_attention": [],
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
+        return _enrich_platform_payload(db, payload, dataset_scores=[])
 
     overall = round(sum(d["overall_score"] for d in dataset_scores) / len(dataset_scores))
     dim_avg: dict[str, int] = {}
@@ -414,7 +532,7 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
         key=lambda x: x["overall_score"],
     )[:10]
 
-    return {
+    payload = {
         "scope": "platform",
         "overall_score": overall,
         "risk_score": max(0, 100 - overall),
@@ -431,7 +549,6 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
             }
             for k in DIMENSION_KEYS
         ],
-        "missing_governance_areas": [DIMENSION_LABELS[k] for k in DIMENSION_KEYS if dim_avg[k] < 70],
         "recommendations": _build_recommendations(dim_avg, []),
         "domains": domains,
         "datasets": [
@@ -440,6 +557,7 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
                 "dataset_name": d["dataset_name"],
                 "domain": d["domain"],
                 "overall_score": d["overall_score"],
+                "governance_score": d["overall_score"],
                 "risk_level": d["risk_level"],
             }
             for d in sorted(dataset_scores, key=lambda x: -x["overall_score"])
@@ -449,12 +567,20 @@ def compute_platform_score(db: Session) -> dict[str, Any]:
                 "dataset_id": d["dataset_id"],
                 "dataset_name": d["dataset_name"],
                 "overall_score": d["overall_score"],
+                "governance_score": d["overall_score"],
                 "missing_governance_areas": d["missing_governance_areas"][:4],
+                "governance_gaps": d.get("governance_gaps", [])[:3],
             }
             for d in needing_attention
         ],
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
+    return _enrich_platform_payload(db, payload, dataset_scores=dataset_scores)
+
+
+def build_governance_dashboard(db: Session) -> dict[str, Any]:
+    """Executive dashboard payload with scores, gaps, trends, and recommendations."""
+    return compute_platform_score(db)
 
 
 def get_dataset_governance_score(db: Session, dataset_id: int) -> dict[str, Any] | None:
@@ -463,5 +589,7 @@ def get_dataset_governance_score(db: Session, dataset_id: int) -> dict[str, Any]
         return None
     result = compute_dataset_score(db, asset)
     result["scope"] = "dataset"
+    result["governance_score"] = result["overall_score"]
+    result["trends"] = _build_trends(db, result["dimensions"], result["overall_score"])
     result["generated_at"] = datetime.utcnow().isoformat() + "Z"
     return result

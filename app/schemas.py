@@ -1026,6 +1026,32 @@ class GovernanceDimensionDetailOut(BaseModel):
     weight_percent: int = 0
 
 
+class GovernanceGapOut(BaseModel):
+    dimension: str
+    label: str
+    score: int
+    target: int = 70
+    gap: int
+    severity: str = "medium"
+    affected_datasets: list[str] = []
+
+
+class GovernanceCoverageMetricOut(BaseModel):
+    key: str
+    label: str
+    score: int
+    status: str = "needs_attention"
+
+
+class GovernanceTrendOut(BaseModel):
+    key: str
+    label: str
+    score: int = 0
+    direction: str = "flat"
+    delta: int = 0
+    unit: str = ""
+
+
 class GovernanceDatasetSummaryOut(BaseModel):
     dataset_id: int
     dataset_name: str
@@ -1058,10 +1084,13 @@ class GovernanceDatasetScoreOut(BaseModel):
     dataset_name: str
     domain: str = ""
     overall_score: int
+    governance_score: int = 0
     risk_score: int
     risk_level: str
     dimensions: dict[str, int]
     dimension_details: list[GovernanceDimensionDetailOut]
+    coverage_metrics: list[GovernanceCoverageMetricOut] = []
+    governance_gaps: list[GovernanceGapOut] = []
     missing_governance_areas: list[str] = []
     recommendations: list[str] = []
     field_count: int = 0
@@ -1077,9 +1106,15 @@ class GovernancePlatformScoreOut(BaseModel):
     domain_count: int
     dimensions: dict[str, int]
     dimension_details: list[GovernanceDimensionDetailOut]
+    coverage_metrics: list[GovernanceCoverageMetricOut] = []
+    governance_gaps: list[GovernanceGapOut] = []
     missing_governance_areas: list[str] = []
     recommendations: list[str] = []
     domains: list[GovernanceDomainScoreOut] = []
     datasets: list[GovernanceDatasetSummaryOut] = []
     datasets_needing_attention: list[GovernanceDatasetAttentionOut] = []
     generated_at: str = ""
+
+
+class GovernanceDashboardOut(GovernancePlatformScoreOut):
+    trends: list[GovernanceTrendOut] = []

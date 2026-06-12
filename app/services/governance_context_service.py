@@ -96,6 +96,9 @@ _GOVERNANCE_SCORE_HINTS = (
     "health dashboard",
     "kpi",
     "coverage",
+    "recommend governance",
+    "governance improvement",
+    "improve governance",
 )
 
 _IMPACT_QUESTION_HINTS = (
@@ -790,7 +793,7 @@ def build_governance_context(
         (page_context or {}).get("page") in ("governance", "dashboard")
     ):
         from app.services.governance_score_service import (
-            compute_platform_score,
+            build_governance_dashboard,
             get_dataset_governance_score,
         )
 
@@ -799,7 +802,7 @@ def build_governance_context(
         if asset_id_raw is not None and str(asset_id_raw).strip().isdigit():
             governance_score_analysis = get_dataset_governance_score(db, int(asset_id_raw))
         else:
-            governance_score_analysis = compute_platform_score(db)
+            governance_score_analysis = build_governance_dashboard(db)
 
     lineage_impact_analysis = None
     if any(h in question_lower for h in _IMPACT_QUESTION_HINTS) or (

@@ -182,6 +182,7 @@ def seed_data(db: Session):
     # If the admin email already exists (e.g. registered earlier), creation is skipped
     # and the stored password is unchanged unless ADMIN_BOOTSTRAP_SYNC_PASSWORD is set.
     bootstrap_password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD", "").strip()
+    admin_full_name = (os.getenv("ADMIN_FULL_NAME", "Platform Admin") or "Platform Admin").strip()
     for admin_email in admin_emails:
         existing_admin_user = (
             db.query(User).filter(User.email.ilike(admin_email)).first()
@@ -193,7 +194,7 @@ def seed_data(db: Session):
 
         db.add(
             User(
-                full_name="Platform Admin",
+                full_name=admin_full_name,
                 email=admin_email,
                 company_name="",
                 password_hash=hash_password(bootstrap_password),
@@ -213,6 +214,23 @@ def seed_data(db: Session):
             user = db.query(User).filter(User.email.ilike(admin_email)).first()
             if user:
                 user.password_hash = hash_password(bootstrap_password)
+                db.add(user)
+        db.commit()
+
+    sync_admin_name = os.getenv("ADMIN_BOOTSTRAP_SYNC_NAME", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if admin_full_name and admin_emails:
+        for admin_email in admin_emails:
+            user = db.query(User).filter(User.email.ilike(admin_email)).first()
+            if not user:
+                continue
+            if user.full_name == admin_full_name:
+                continue
+            if sync_admin_name or user.full_name == "Platform Admin":
+                user.full_name = admin_full_name
                 db.add(user)
         db.commit()
 

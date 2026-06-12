@@ -189,6 +189,14 @@ def _heuristic_answer(*, question: str, context: dict[str, Any]) -> str:
         recs = score_analysis.get("recommendations") or []
         if recs:
             parts.append("Recommendations: " + " ".join(recs[:3]))
+        if any(w in q for w in ("recommend", "improve", "improvement")):
+            gaps = score_analysis.get("governance_gaps") or []
+            if gaps:
+                gap_lines = [
+                    f"{g.get('label')} ({g.get('score')}% — gap {g.get('gap')} pts)"
+                    for g in gaps[:4]
+                ]
+                parts.append("Priority improvements: " + "; ".join(gap_lines) + ".")
 
     doc_analysis = context.get("documentation_analysis") or {}
     if doc_analysis:
