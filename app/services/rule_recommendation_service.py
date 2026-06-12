@@ -6,12 +6,11 @@ import json
 import re
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.models import CatalogAsset, Rule, RuleRecommendation
-from app.services.ai_copilot import ai_enabled, ai_provider
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled
+from app.services.llm_provider import chat_completion_json, llm_is_available
 from app.services.data_classification_service import analyze_dataset, classify_field_name
 from app.services.glossary_generator_service import get_saved_glossary_entries
 
@@ -310,49 +309,24 @@ def _build_context(db: Session, asset: CatalogAsset) -> dict[str, Any]:
     }
 
 
-def _call_groq_recommendations(context: dict[str, Any], *, field_name: str = "") -> list[dict[str, Any]]:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm_recommendations(
+    context: dict[str, Any], *, field_name: str = ""
+) -> tuple[list[dict[str, Any]], str]:
     prompt = (
         f"Recommend data quality rules for field '{field_name}'."
         if field_name
         else f"Recommend data quality rules for dataset '{context.get('dataset_name', '')}'."
     )
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": f"{prompt}\n\nContext:\n{json.dumps(context, ensure_ascii=True, indent=2)}",
-                    },
-                ],
-                "temperature": 0.2,
-                "max_tokens": 1200,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        raw = (response.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        items = data.get("recommended_rules") or []
-        if not isinstance(items, list):
-            raise RuntimeError("Invalid Groq rules payload")
-        return items
+    data, engine = chat_completion_json(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=f"{prompt}\n\nContext:\n{json.dumps(context, ensure_ascii=True, indent=2)}",
+        temperature=0.2,
+        max_tokens=1200,
+    )
+    items = data.get("recommended_rules") or []
+    if not isinstance(items, list):
+        raise RuntimeError("Invalid LLM rules payload")
+    return items, engine
 
 
 def _normalize_recommendation(item: dict[str, Any], default_field: str = "") -> dict[str, Any]:
@@ -414,13 +388,13 @@ def recommend_rules_for_field(
     rules = heuristic
     source_engine = "heuristics"
 
-    if asset and ai_enabled() and ai_provider() == "groq" and groq_is_configured():
+    if asset and ai_enabled() and llm_is_available():
         try:
             context = _build_context(db, asset)
-            groq_items = _call_groq_recommendations(context, field_name=field_name)
+            llm_items, engine = _call_llm_recommendations(context, field_name=field_name)
             merged: list[dict[str, Any]] = []
             seen: set[tuple[str, str]] = set()
-            for item in groq_items + heuristic:
+            for item in llm_items + heuristic:
                 norm = _normalize_recommendation(item, default_field=field_name)
                 if not norm["rule_text"]:
                     continue
@@ -433,8 +407,8 @@ def recommend_rules_for_field(
                 merged.append(norm)
             if merged:
                 rules = merged
-                source_engine = "groq"
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                source_engine = engine
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     risk = _compute_risk_scores(
@@ -475,18 +449,18 @@ def recommend_rules_for_dataset(db: Session, dataset_id: int) -> dict[str, Any] 
         )
         for rule in field_result.get("rules") or []:
             all_rules.append(rule)
-        if field_result.get("source_engine") == "groq":
-            source_engine = "groq"
+        if field_result.get("source_engine") in ("groq", "azure_openai"):
+            source_engine = field_result["source_engine"]
 
-    if ai_enabled() and ai_provider() == "groq" and groq_is_configured() and not fields:
+    if ai_enabled() and llm_is_available() and not fields:
         try:
-            groq_items = _call_groq_recommendations(context)
-            for item in groq_items:
+            llm_items, engine = _call_llm_recommendations(context)
+            for item in llm_items:
                 norm = _normalize_recommendation(item)
                 if norm["rule_text"]:
-                    all_rules.append({**norm, "source_engine": "groq"})
-            source_engine = "groq"
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                    all_rules.append({**norm, "source_engine": engine})
+            source_engine = engine
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     existing_count = len(context.get("existing_rules") or [])

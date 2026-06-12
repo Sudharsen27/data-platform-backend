@@ -1,16 +1,15 @@
-"""AI Governance Copilot — Groq LLM with metadata-grounded responses."""
+"""AI Governance Copilot — Groq / Azure OpenAI with metadata-grounded responses."""
 
 from __future__ import annotations
 
 import json
-import os
-import re
 from typing import Any
 
 import httpx
 
-from app.services.ai_copilot import ai_enabled, ai_provider
+from app.services.ai_copilot import ai_enabled
 from app.services.governance_context_service import build_governance_context
+from app.services.llm_provider import chat_completion_text, llm_is_available
 
 _SYSTEM_PROMPT = """You are an AI Governance Copilot for a Metadata Management platform.
 
@@ -30,34 +29,13 @@ Respond in clear, concise prose. Use bullet points when listing multiple items.
 Cite asset keys, field names, or rule IDs from the metadata when relevant."""
 
 
-def groq_api_key() -> str:
-    return os.getenv("GROQ_API_KEY", "").strip()
-
-
-def groq_model() -> str:
-    return os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
-
-
-def groq_timeout_seconds() -> float:
-    try:
-        return max(10.0, float(os.getenv("GROQ_TIMEOUT_SECONDS", "60")))
-    except ValueError:
-        return 60.0
-
-
-def groq_is_configured() -> bool:
-    return bool(groq_api_key())
-
-
 def _format_context_for_prompt(context: dict[str, Any]) -> str:
     return json.dumps(context, ensure_ascii=True, indent=2)
 
 
-def _call_groq(*, question: str, context: dict[str, Any], page_context: dict[str, Any] | None = None) -> str:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm_copilot(
+    *, question: str, context: dict[str, Any], page_context: dict[str, Any] | None = None
+) -> tuple[str, str]:
     page_block = ""
     if page_context:
         page_block = f"\nCurrent UI page context (JSON):\n{json.dumps(page_context, ensure_ascii=True, indent=2)}\n"
@@ -67,37 +45,12 @@ def _call_groq(*, question: str, context: dict[str, Any], page_context: dict[str
         f"{page_block}\n"
         f"Governance metadata context (JSON):\n{_format_context_for_prompt(context)}"
     )
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 1024,
-            },
-        )
-        if response.status_code != 200:
-            detail = response.text[:300]
-            raise RuntimeError(f"Groq API error ({response.status_code}): {detail}")
-
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError("Groq API returned no choices")
-        message = choices[0].get("message") or {}
-        text = (message.get("content") or "").strip()
-        if not text:
-            raise RuntimeError("Groq API returned empty content")
-        return re.sub(r"\s+", " ", text).strip()
+    return chat_completion_text(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=user_content,
+        temperature=0.2,
+        max_tokens=1024,
+    )
 
 
 def _heuristic_answer(*, question: str, context: dict[str, Any]) -> str:
@@ -299,9 +252,9 @@ def answer_governance_question(
             "context_summary": context.get("summary_counts") or {},
         }
 
-    if ai_provider() == "groq" and groq_is_configured():
+    if llm_is_available():
         try:
-            answer = _call_groq(
+            answer, engine = _call_llm_copilot(
                 question=trimmed,
                 context=context,
                 page_context=ui_page_context or page_context,
@@ -309,7 +262,7 @@ def answer_governance_question(
             return {
                 "answer": answer,
                 "sources": sources,
-                "source_engine": "groq",
+                "source_engine": engine,
                 "context_summary": context.get("summary_counts") or {},
             }
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:

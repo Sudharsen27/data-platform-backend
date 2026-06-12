@@ -6,12 +6,11 @@ import json
 import re
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.models import CatalogAsset, GlossaryEntry
-from app.services.ai_copilot import ai_enabled, ai_provider
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled
+from app.services.llm_provider import chat_completion_json, llm_is_available
 
 _SYSTEM_PROMPT = """You are a Data Governance and Business Glossary Expert.
 
@@ -143,43 +142,16 @@ def _heuristic_dataset_glossary(asset: CatalogAsset) -> dict[str, Any]:
     }
 
 
-def _call_groq_glossary(*, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm_glossary(*, prompt: str, context: dict[str, Any]) -> tuple[dict[str, Any], str]:
     user_content = (
         f"{prompt}\n\nContext (JSON):\n{json.dumps(context, ensure_ascii=True, indent=2)}"
     )
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.25,
-                "max_tokens": 900,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        raw = (response.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise RuntimeError("Groq response was not a JSON object")
-        return data
+    return chat_completion_json(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=user_content,
+        temperature=0.25,
+        max_tokens=900,
+    )
 
 
 def generate_field_glossary(
@@ -208,9 +180,9 @@ def generate_field_glossary(
         "pii_tier": pii_tier,
     }
 
-    if ai_enabled() and ai_provider() == "groq" and groq_is_configured():
+    if ai_enabled() and llm_is_available():
         try:
-            data = _call_groq_glossary(
+            data, engine = _call_llm_glossary(
                 prompt=f"Generate a business glossary entry for field '{field_name}'.",
                 context=context,
             )
@@ -221,9 +193,9 @@ def generate_field_glossary(
                 "usage": (data.get("usage") or "").strip(),
                 "governance_notes": (data.get("governance_notes") or "").strip(),
                 "examples": [str(x) for x in (data.get("examples") or [])][:5],
-                "source_engine": "groq",
+                "source_engine": engine,
             }
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     base = _heuristic_field_glossary(
@@ -271,9 +243,9 @@ def generate_dataset_glossary(db: Session, asset_id: int) -> dict[str, Any] | No
         for field in fields[:20]
     ]
 
-    if ai_enabled() and ai_provider() == "groq" and groq_is_configured():
+    if ai_enabled() and llm_is_available():
         try:
-            data = _call_groq_glossary(
+            data, engine = _call_llm_glossary(
                 prompt=f"Generate a dataset-level business glossary entry for '{asset.name}'.",
                 context=context,
             )
@@ -285,9 +257,9 @@ def generate_dataset_glossary(db: Session, asset_id: int) -> dict[str, Any] | No
                 "business_usage": (data.get("usage") or data.get("business_usage") or "").strip(),
                 "governance_notes": (data.get("governance_notes") or "").strip(),
                 "field_glossaries": field_glossaries,
-                "source_engine": "groq",
+                "source_engine": engine,
             }
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     base = _heuristic_dataset_glossary(asset)

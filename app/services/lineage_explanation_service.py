@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-import httpx
-
-from app.services.ai_copilot import ai_enabled, ai_provider
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled
+from app.services.llm_provider import chat_completion_text, llm_is_available
 
 _SYSTEM_PROMPT = """You are a data governance architect explaining lineage impact to business users.
 
@@ -62,11 +59,7 @@ def _heuristic_explanation(*, question: str, impact: dict[str, Any]) -> str:
     return " ".join(lines)
 
 
-def _call_groq(*, question: str, impact: dict[str, Any]) -> str:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm(*, question: str, impact: dict[str, Any]) -> tuple[str, str]:
     payload = {
         k: impact.get(k)
         for k in (
@@ -93,32 +86,12 @@ def _call_groq(*, question: str, impact: dict[str, Any]) -> str:
         f"User question:\n{question.strip()}\n\n"
         f"Lineage impact analysis (JSON):\n{json.dumps(payload, ensure_ascii=True, indent=2)}"
     )
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 800,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        choices = response.json().get("choices") or []
-        text = (choices[0].get("message") or {}).get("content") or ""
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            raise RuntimeError("Empty Groq response")
-        return text
+    return chat_completion_text(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=user_content,
+        temperature=0.2,
+        max_tokens=800,
+    )
 
 
 def explain_lineage_impact(*, question: str, impact: dict[str, Any]) -> dict[str, Any]:
@@ -148,14 +121,15 @@ def explain_lineage_impact(*, question: str, impact: dict[str, Any]) -> dict[str
             "source_engine": "heuristics",
         }
 
-    if ai_provider() == "groq" and groq_is_configured():
+    if llm_is_available():
         try:
+            analysis, engine = _call_llm(question=question, impact=impact)
             return {
-                "analysis": _call_groq(question=question, impact=impact),
+                "analysis": analysis,
                 "impacts": impacts[:20],
-                "source_engine": "groq",
+                "source_engine": engine,
             }
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             pass
 
     return {

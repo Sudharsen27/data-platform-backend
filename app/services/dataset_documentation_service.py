@@ -6,12 +6,11 @@ import json
 import re
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.models import CatalogAsset, DatasetDocumentation, GlossaryEntry, Rule
-from app.services.ai_copilot import ai_enabled, ai_provider
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled
+from app.services.llm_provider import chat_completion_json, llm_is_available
 from app.services.data_classification_service import analyze_dataset, classify_field_name
 from app.services.glossary_generator_service import (
     generate_field_glossary,
@@ -232,11 +231,7 @@ def _heuristic_documentation(asset: CatalogAsset, context: dict[str, Any]) -> di
     }
 
 
-def _call_groq_documentation(context: dict[str, Any]) -> dict[str, Any]:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm_documentation(context: dict[str, Any]) -> tuple[dict[str, Any], str]:
     slim_context = {
         k: context.get(k)
         for k in (
@@ -256,41 +251,15 @@ def _call_groq_documentation(context: dict[str, Any]) -> dict[str, Any]:
             "approved_glossary_terms",
         )
     }
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Generate enterprise dataset documentation.\n\n"
-                            f"Context (JSON):\n{json.dumps(slim_context, ensure_ascii=True, indent=2)}"
-                        ),
-                    },
-                ],
-                "temperature": 0.25,
-                "max_tokens": 1400,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        raw = (response.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise RuntimeError("Groq response was not a JSON object")
-        return data
+    return chat_completion_json(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=(
+            "Generate enterprise dataset documentation.\n\n"
+            f"Context (JSON):\n{json.dumps(slim_context, ensure_ascii=True, indent=2)}"
+        ),
+        temperature=0.25,
+        max_tokens=1400,
+    )
 
 
 def generate_dataset_documentation(db: Session, dataset_id: int) -> dict[str, Any] | None:
@@ -300,9 +269,9 @@ def generate_dataset_documentation(db: Session, dataset_id: int) -> dict[str, An
 
     context = build_documentation_context(db, asset)
 
-    if ai_enabled() and ai_provider() == "groq" and groq_is_configured():
+    if ai_enabled() and llm_is_available():
         try:
-            data = _call_groq_documentation(context)
+            data, engine = _call_llm_documentation(context)
             key_fields = data.get("key_fields")
             if not isinstance(key_fields, list) or not key_fields:
                 key_fields = context.get("key_fields") or []
@@ -320,9 +289,9 @@ def generate_dataset_documentation(db: Session, dataset_id: int) -> dict[str, An
                 "quality_expectations": (data.get("quality_expectations") or "").strip(),
                 "usage_guidelines": (data.get("usage_guidelines") or "").strip(),
                 "compliance_considerations": (data.get("compliance_considerations") or "").strip(),
-                "source_engine": "groq",
+                "source_engine": engine,
             }
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     return _heuristic_documentation(asset, context)

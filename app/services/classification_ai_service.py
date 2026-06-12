@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-import httpx
-
-from app.services.ai_copilot import ai_enabled, ai_provider
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled
+from app.services.llm_provider import chat_completion_text, llm_is_available
 
 _SYSTEM_PROMPT = """You are a data governance architect explaining data classification results.
 
@@ -47,57 +44,34 @@ def _heuristic_dataset_explanation(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _call_groq(*, prompt: str, payload: dict[str, Any]) -> str:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
+def _call_llm(*, prompt: str, payload: dict[str, Any]) -> tuple[str, str]:
     user_content = (
         f"{prompt}\n\n"
         f"Classification data (JSON):\n{json.dumps(payload, ensure_ascii=True, indent=2)}"
     )
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 700,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        text = (response.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            raise RuntimeError("Empty Groq response")
-        return text
+    return chat_completion_text(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=user_content,
+        temperature=0.2,
+        max_tokens=700,
+    )
 
 
 def enhance_field_classification(result: dict[str, Any]) -> dict[str, Any]:
     """Add AI explanation to a field classification result."""
-    if not ai_enabled() or not (ai_provider() == "groq" and groq_is_configured()):
+    if not ai_enabled() or not llm_is_available():
         return {
             **result,
             "ai_explanation": _heuristic_field_explanation(result),
             "source_engine": "heuristics",
         }
     try:
-        explanation = _call_groq(
+        explanation, engine = _call_llm(
             prompt=f"Explain the classification for field '{result.get('field_name')}'.",
             payload=result,
         )
-        return {**result, "ai_explanation": explanation, "source_engine": "groq"}
-    except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+        return {**result, "ai_explanation": explanation, "source_engine": engine}
+    except (OSError, RuntimeError, ValueError):
         return {
             **result,
             "ai_explanation": _heuristic_field_explanation(result),
@@ -107,14 +81,14 @@ def enhance_field_classification(result: dict[str, Any]) -> dict[str, Any]:
 
 def enhance_dataset_classification(result: dict[str, Any]) -> dict[str, Any]:
     """Add AI summary to a dataset classification result."""
-    if not ai_enabled() or not (ai_provider() == "groq" and groq_is_configured()):
+    if not ai_enabled() or not llm_is_available():
         return {
             **result,
             "ai_summary": _heuristic_dataset_explanation(result),
             "source_engine": "heuristics",
         }
     try:
-        summary = _call_groq(
+        summary, engine = _call_llm(
             prompt=f"Summarize governance classification for dataset '{result.get('dataset_name')}'.",
             payload={
                 k: result.get(k)
@@ -133,8 +107,8 @@ def enhance_dataset_classification(result: dict[str, Any]) -> dict[str, Any]:
                 )
             },
         )
-        return {**result, "ai_summary": summary, "source_engine": "groq"}
-    except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+        return {**result, "ai_summary": summary, "source_engine": engine}
+    except (OSError, RuntimeError, ValueError):
         return {
             **result,
             "ai_summary": _heuristic_dataset_explanation(result),

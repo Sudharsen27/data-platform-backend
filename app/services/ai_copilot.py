@@ -61,17 +61,26 @@ def get_ai_status() -> dict:
             "mode": "disabled",
         }
 
-    if provider == "groq":
-        from app.services.copilot_service import groq_is_configured, groq_model
+    if provider in ("groq", "azure_openai"):
+        from app.services.llm_provider import (
+            active_model_name,
+            get_llm_status,
+            llm_is_available,
+            resolve_active_provider,
+        )
 
-        model = groq_model()
-        configured = groq_is_configured()
+        status = get_llm_status()
+        active = resolve_active_provider()
         return {
             "enabled": True,
-            "provider": "groq",
-            "model": model,
-            "available": configured,
-            "mode": "groq" if configured else "heuristics",
+            "provider": provider,
+            "active_provider": active,
+            "model": active_model_name(active),
+            "available": llm_is_available(),
+            "mode": active if llm_is_available() else "heuristics",
+            "fallback_to_groq": status.get("fallback_to_groq", False),
+            "azure_openai_configured": status.get("azure_openai_configured", False),
+            "groq_configured": status.get("groq_configured", False),
         }
 
     if provider == "ollama":

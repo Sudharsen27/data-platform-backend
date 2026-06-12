@@ -6,12 +6,11 @@ import json
 import re
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.models import CatalogAsset, QuarantineData, Rule, StewardshipQueue, StewardshipRemediation
-from app.services.ai_copilot import ai_enabled, ai_provider, explain_quarantine_heuristic
-from app.services.copilot_service import groq_api_key, groq_is_configured, groq_model, groq_timeout_seconds
+from app.services.ai_copilot import ai_enabled, explain_quarantine_heuristic
+from app.services.llm_provider import chat_completion_json, llm_is_available
 from app.services.data_classification_service import classify_field_name
 
 _SYSTEM_PROMPT = """You are an Enterprise Data Stewardship and Remediation Expert.
@@ -239,45 +238,16 @@ def _heuristic_remediation(record: StewardshipQueue, context: dict[str, Any]) ->
     }
 
 
-def _call_groq_remediation(context: dict[str, Any]) -> dict[str, Any]:
-    api_key = groq_api_key()
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is not configured")
-
-    with httpx.Client(timeout=groq_timeout_seconds()) as client:
-        response = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": groq_model(),
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Analyze this stewardship failure and recommend remediation.\n\n"
-                            f"Context:\n{json.dumps(context, ensure_ascii=True, indent=2)}"
-                        ),
-                    },
-                ],
-                "temperature": 0.25,
-                "max_tokens": 900,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error ({response.status_code})")
-        raw = (response.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise RuntimeError("Groq response was not a JSON object")
-        return data
+def _call_llm_remediation(context: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    return chat_completion_json(
+        system_prompt=_SYSTEM_PROMPT,
+        user_prompt=(
+            "Analyze this stewardship failure and recommend remediation.\n\n"
+            f"Context:\n{json.dumps(context, ensure_ascii=True, indent=2)}"
+        ),
+        temperature=0.25,
+        max_tokens=900,
+    )
 
 
 def explain_stewardship_failure(db: Session, stewardship_id: int) -> dict[str, Any] | None:
@@ -296,9 +266,9 @@ def explain_stewardship_failure(db: Session, stewardship_id: int) -> dict[str, A
 def generate_remediation(db: Session, record: StewardshipQueue) -> dict[str, Any]:
     context = build_remediation_context(db, record)
 
-    if ai_enabled() and ai_provider() == "groq" and groq_is_configured():
+    if ai_enabled() and llm_is_available():
         try:
-            data = _call_groq_remediation(context)
+            data, engine = _call_llm_remediation(context)
             score = int(data.get("risk_score") or 60)
             score = max(0, min(100, score))
             return {
@@ -315,9 +285,9 @@ def generate_remediation(db: Session, record: StewardshipQueue) -> dict[str, Any
                     "failed_fields": context.get("failed_fields"),
                     "matching_rules": context.get("matching_rules"),
                 },
-                "source_engine": "groq",
+                "source_engine": engine,
             }
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             pass
 
     return _heuristic_remediation(record, context)
